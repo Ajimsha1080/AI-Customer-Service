@@ -1,5 +1,5 @@
 'use client';
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Upload, FileText, Trash2, Search, BookOpen, HelpCircle, Shield, Info, Sparkles, ExternalLink, Plus, Eye, RefreshCw, X } from 'lucide-react';
 import Link from 'next/link';
 
@@ -25,34 +25,144 @@ export default function AppKnowledgeBasePage() {
   // View Document Modal state
   const [viewingDoc, setViewingDoc] = useState<any | null>(null);
 
+  const API_BASE = 'http://127.0.0.1:8000';
+
+  const fetchDocuments = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/v1/knowledge/documents?organization_id=org_azure_group`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.length > 0) {
+          const mapped = data.map((d: any) => ({
+            id: d.id,
+            title: d.title,
+            category: d.title.toLowerCase().includes('faq') ? 'faqs' : (d.title.toLowerCase().includes('rule') || d.title.toLowerCase().includes('policy') ? 'rules' : 'documents'),
+            type: (d.type || 'TXT').toUpperCase(),
+            status: d.status === 'PROCESSED' ? 'Ready' : (d.status || 'Ready'),
+            date: d.created_at ? `Added ${d.created_at.split('T')[0]}` : 'Added recently',
+            updated: 'Updated today',
+            content: `Ingested document: ${d.title} (${d.chunks || 1} vector chunks stored)`
+          }));
+          setDocuments(prev => {
+            const combined = [...mapped];
+            for (const p of prev) {
+              if (!combined.some(c => c.id === p.id)) {
+                combined.push(p);
+              }
+            }
+            return combined;
+          });
+        }
+      }
+    } catch (e) {
+      console.error('Failed to fetch knowledge documents:', e);
+    }
+  };
+
+  useEffect(() => {
+    fetchDocuments();
+  }, []);
+
   const showToast = (msg: string) => {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(null), 4000);
   };
 
-  const handleUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    const newDoc = {
-      id: `doc_${Date.now()}`,
-      title: file.name,
-      category: docCategory,
-      type: file.name.split('.').pop()?.toUpperCase() || 'DOCUMENT',
-      status: 'Ready',
-      date: 'Added today',
-      updated: 'Updated just now',
-      content: `Uploaded document: ${file.name}`
-    };
+    const reader = new FileReader();
+    reader.onload = async (event) => {
+      const content = (event.target?.result as string) || file.name;
+      try {
+        const res = await fetch(`${API_BASE}/api/v1/knowledge/documents`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            organization_id: 'org_azure_group',
+            property_id: 'prop_azure_palm_resort',
+            title: file.name,
+            content: content,
+            document_type: file.name.split('.').pop() || 'txt'
+          })
+        });
+        if (res.ok) {
+          const apiDoc = await res.json();
+          const newDoc = {
+            id: apiDoc.id || `doc_${Date.now()}`,
+            title: file.name,
+            category: docCategory,
+            type: file.name.split('.').pop()?.toUpperCase() || 'DOCUMENT',
+            status: 'Ready',
+            date: 'Added today',
+            updated: 'Updated just now',
+            content: content
+          };
+          setDocuments(prev => [newDoc, ...prev]);
+          setIsAddModalOpen(false);
+          showToast(`✓ Knowledge added & indexed: "${file.name}" ready for AI Assistant.`);
+          return;
+        }
+      } catch (err) {
+        console.error('Failed to post document:', err);
+      }
 
-    setDocuments([newDoc, ...documents]);
-    setIsAddModalOpen(false);
-    showToast(`✓ Knowledge added: "${file.name}" is Ready for Hostel AI Agent inquiries.`);
+      const newDoc = {
+        id: `doc_${Date.now()}`,
+        title: file.name,
+        category: docCategory,
+        type: file.name.split('.').pop()?.toUpperCase() || 'DOCUMENT',
+        status: 'Ready',
+        date: 'Added today',
+        updated: 'Updated just now',
+        content: `Uploaded document: ${file.name}`
+      };
+      setDocuments(prev => [newDoc, ...prev]);
+      setIsAddModalOpen(false);
+      showToast(`✓ Knowledge added: "${file.name}" ready for AI Assistant.`);
+    };
+    reader.readAsText(file);
   };
 
-  const handleAddTextKnowledge = (e: React.FormEvent) => {
+  const handleAddTextKnowledge = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!docTitle.trim() || !docContent.trim()) return;
+
+    try {
+      const res = await fetch(`${API_BASE}/api/v1/knowledge/documents`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          organization_id: 'org_azure_group',
+          property_id: 'prop_azure_palm_resort',
+          title: docTitle,
+          content: docContent,
+          document_type: 'txt'
+        })
+      });
+      if (res.ok) {
+        const apiDoc = await res.json();
+        const newDoc = {
+          id: apiDoc.id || `doc_${Date.now()}`,
+          title: docTitle,
+          category: docCategory,
+          type: 'TEXT',
+          status: 'Ready',
+          date: 'Added today',
+          updated: 'Updated just now',
+          content: docContent
+        };
+        setDocuments(prev => [newDoc, ...prev]);
+        setDocTitle('');
+        setDocContent('');
+        setIsAddModalOpen(false);
+        showToast(`✓ Knowledge added & indexed: "${newDoc.title}" ready for AI Assistant.`);
+        return;
+      }
+    } catch (err) {
+      console.error('Failed to post text knowledge:', err);
+    }
 
     const newDoc = {
       id: `doc_${Date.now()}`,
@@ -65,17 +175,25 @@ export default function AppKnowledgeBasePage() {
       content: docContent
     };
 
-    setDocuments([newDoc, ...documents]);
+    setDocuments(prev => [newDoc, ...prev]);
     setDocTitle('');
     setDocContent('');
     setIsAddModalOpen(false);
-    showToast(`✓ Knowledge added: "${newDoc.title}" is Ready for AI Assistant inquiries.`);
+    showToast(`✓ Knowledge added: "${newDoc.title}" ready for AI Assistant.`);
   };
 
-  const handleRemoveDoc = (id: string, title: string) => {
+  const handleRemoveDoc = async (id: string, title: string) => {
+    try {
+      await fetch(`${API_BASE}/api/v1/knowledge/documents/${id}?organization_id=org_azure_group&property_id=prop_azure_palm_resort`, {
+        method: 'DELETE'
+      });
+    } catch (err) {
+      console.error('Failed to delete document from backend:', err);
+    }
     setDocuments(prev => prev.filter(d => d.id !== id));
     showToast(`✓ Removed knowledge document: "${title}".`);
   };
+
 
   const filteredDocs = documents.filter(d => {
     const matchesCat = d.category === activeCategory;

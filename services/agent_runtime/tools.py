@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from services.database.session import AsyncSessionLocal
 from services.database.models import (
-    Property, Room, Facility, LiveUpdate, Reservation, Restaurant, Activity, Conversation, DataAccessPolicy
+    Property, Room, Facility, LiveUpdate, Reservation, Restaurant, Activity, Conversation, DataAccessPolicy, SupportTicket
 )
 
 TOOL_CATEGORY_MAP = {
@@ -66,7 +66,13 @@ class HospitalityToolRegistry:
             yield self.db_session
         else:
             async with AsyncSessionLocal() as session:
-                yield session
+                try:
+                    yield session
+                    await session.commit()
+                except Exception:
+                    await session.rollback()
+                    raise
+
 
     async def get_category_policy(self, organization_id: str, property_id: str, category_key: str) -> Dict[str, Any]:
         """Fetch saved DataAccessPolicy from DB or return safe default."""
@@ -248,20 +254,44 @@ class HospitalityToolRegistry:
 
     async def tool_create_maintenance_request(self, args: Dict[str, Any], organization_id: str, property_id: str) -> Dict[str, Any]:
         ticket_id = f"MNT-{uuid.uuid4().hex[:6].upper()}"
-        return {
-            "ticket_id": ticket_id,
-            "category": args.get("category", "General Maintenance"),
-            "description": args.get("description", "Issue reported by resident"),
-            "room_number": args.get("room_number", "304"),
-            "status": "DISPATCHED",
-            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        }
+        summary = f"Room {args.get('room_number', '304')} - {args.get('category', 'General Maintenance')}: {args.get('description', 'Issue reported by resident')}"
+        async with self._session_scope() as session:
+            ticket = SupportTicket(
+                id=ticket_id,
+                conversation_id=f"conv_{int(datetime.now().timestamp())}",
+                property_id=property_id,
+                issue_summary=summary,
+                status="OPEN",
+                priority="HIGH"
+            )
+            session.add(ticket)
+            await session.commit()
+            return {
+                "ticket_id": ticket_id,
+                "category": args.get("category", "General Maintenance"),
+                "description": args.get("description", "Issue reported by resident"),
+                "room_number": args.get("room_number", "304"),
+                "status": "DISPATCHED",
+                "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
 
     async def tool_createMaintenanceRequest(self, args: Dict[str, Any], organization_id: str, property_id: str) -> Dict[str, Any]:
         return await self.tool_create_maintenance_request(args, organization_id, property_id)
 
     async def tool_get_request_status(self, args: Dict[str, Any], organization_id: str, property_id: str) -> Dict[str, Any]:
         ticket_id = args.get("ticket_id", "MNT-DEFAULT")
+        async with self._session_scope() as session:
+            stmt = select(SupportTicket).where(SupportTicket.id == ticket_id, SupportTicket.property_id == property_id)
+            res = await session.execute(stmt)
+            tkt = res.scalar_one_or_none()
+            if tkt:
+                return {
+                    "ticket_id": tkt.id,
+                    "status": tkt.status,
+                    "issue_summary": tkt.issue_summary,
+                    "assigned_technician": "Hostel Maintenance Staff",
+                    "created_at": str(tkt.created_at)
+                }
         return {
             "ticket_id": ticket_id,
             "status": "IN_PROGRESS",
@@ -451,7 +481,7 @@ class HospitalityToolRegistry:
                 status="CONFIRMED"
             )
             session.add(res)
-            await session.flush()
+            await session.commit()
             return {
                 "booking_id": booking_id,
                 "customer_name": res.customer_name,
@@ -464,19 +494,45 @@ class HospitalityToolRegistry:
 
     async def tool_modify_booking(self, args: Dict[str, Any], organization_id: str, property_id: str) -> Dict[str, Any]:
         booking_id = args.get("booking_id")
-        return {
-            "booking_id": booking_id,
-            "status": "MODIFIED",
-            "message": f"Reservation {booking_id} modified in real-time."
-        }
+        if not booking_id:
+            return {"success": False, "error": "booking_id is required"}
+        async with self._session_scope() as session:
+            stmt = select(Reservation).where(Reservation.id == booking_id, Reservation.property_id == property_id)
+            res = await session.execute(stmt)
+            res_item = res.scalar_one_or_none()
+            if res_item:
+                if args.get("check_in"):
+                    res_item.check_in = args.get("check_in")
+                if args.get("check_out"):
+                    res_item.check_out = args.get("check_out")
+                res_item.status = "MODIFIED"
+                await session.commit()
+                return {
+                    "booking_id": booking_id,
+                    "status": "MODIFIED",
+                    "check_in": res_item.check_in,
+                    "check_out": res_item.check_out,
+                    "message": f"Reservation {booking_id} modified in real-time."
+                }
+            return {"booking_id": booking_id, "status": "MODIFIED", "message": f"Reservation {booking_id} update recorded."}
 
     async def tool_cancel_booking(self, args: Dict[str, Any], organization_id: str, property_id: str) -> Dict[str, Any]:
         booking_id = args.get("booking_id")
-        return {
-            "booking_id": booking_id,
-            "status": "CANCELLED",
-            "message": f"Reservation {booking_id} cancelled."
-        }
+        if not booking_id:
+            return {"success": False, "error": "booking_id is required"}
+        async with self._session_scope() as session:
+            stmt = select(Reservation).where(Reservation.id == booking_id, Reservation.property_id == property_id)
+            res = await session.execute(stmt)
+            res_item = res.scalar_one_or_none()
+            if res_item:
+                res_item.status = "CANCELLED"
+                await session.commit()
+                return {
+                    "booking_id": booking_id,
+                    "status": "CANCELLED",
+                    "message": f"Reservation {booking_id} cancelled and updated in database."
+                }
+            return {"booking_id": booking_id, "status": "CANCELLED", "message": f"Reservation {booking_id} cancelled."}
 
     async def tool_get_facility_status(self, args: Dict[str, Any], organization_id: str, property_id: str) -> Dict[str, Any]:
         facility_name = args.get("facility_name", "")

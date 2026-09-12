@@ -8,7 +8,7 @@ class VectorStoreInterface(ABC):
         pass
 
     @abstractmethod
-    async def similarity_search(self, query: str, organization_id: str, property_id: str, agent_id: Optional[str] = None, top_k: int = 5) -> List[Dict[str, Any]]:
+    async def delete_document(self, document_id: str, organization_id: str, property_id: str) -> bool:
         pass
 
 class MockEmbeddings:
@@ -52,6 +52,25 @@ class PostgresPgVectorStore(VectorStoreInterface):
             self._in_memory_store.append(entry)
             added_ids.append(doc_id)
         return added_ids
+
+    async def delete_document(self, document_id: str, organization_id: str, property_id: str) -> bool:
+        initial_len = len(self._in_memory_store)
+        doc_id_normalized = document_id.replace(' ', '_')
+        self._in_memory_store = [
+            item for item in self._in_memory_store
+            if not (
+                item["organization_id"] == organization_id and
+                item["property_id"] == property_id and
+                (
+                    item["metadata"].get("document_id") == document_id or
+                    item["metadata"].get("title") == document_id or
+                    doc_id_normalized in item["id"] or
+                    document_id in item["id"]
+                )
+            )
+        ]
+        return len(self._in_memory_store) < initial_len
+
 
     async def similarity_search(self, query: str, organization_id: str, property_id: str, agent_id: Optional[str] = None, top_k: int = 5) -> List[Dict[str, Any]]:
         query_vec = self.embedder.embed_text(query)

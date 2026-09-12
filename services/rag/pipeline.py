@@ -91,3 +91,17 @@ class RAGPipeline:
             context_blocks.append(f"[Source {idx+1}: {source}]\n{res['content']}")
 
         return "\n\n".join(context_blocks)
+
+    async def delete_document(
+        self,
+        document_id: str,
+        organization_id: str,
+        property_id: str
+    ) -> bool:
+        """Deletes document chunks from vector storage."""
+        return await self.vector_store.delete_document(
+            document_id=document_id,
+            organization_id=organization_id,
+            property_id=property_id
+        )
+

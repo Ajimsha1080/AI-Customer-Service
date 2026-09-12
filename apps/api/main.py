@@ -5,9 +5,11 @@ import wave
 import math
 import struct
 import base64
+from datetime import datetime, timezone
 import httpx
 from dotenv import load_dotenv
 load_dotenv()
+
 
 import asyncio
 import json
@@ -158,6 +160,16 @@ class CreateAgentRequest(BaseModel):
     system_prompt: Optional[str] = None
     tone: Optional[str] = "Friendly, Professional, Courteous"
 
+class UpdateAgentConfigRequest(BaseModel):
+    name: Optional[str] = None
+    status: Optional[str] = None
+    description: Optional[str] = None
+    model_name: Optional[str] = None
+    system_prompt: Optional[str] = None
+    greeting: Optional[str] = None
+    enabled_tools: Optional[List[str]] = None
+
+
 class AgentChatRequest(BaseModel):
     organization_id: str
     property_id: str
@@ -293,16 +305,100 @@ async def get_property_details(property_id: str, db: AsyncSession = Depends(get_
 
 # --- AGENT CONTROL PLANE & LIFECYCLE ---
 @app.post("/api/v1/agents", tags=["Control Plane - Agents"])
-async def create_agent(req: CreateAgentRequest):
+async def create_agent(req: CreateAgentRequest, db: AsyncSession = Depends(get_db)):
     agent = agent_sdk.createAgent(
         organization_id=req.organization_id,
         property_id=req.property_id,
         name=req.name,
         agent_type=req.agent_type
     )
+    stmt = select(Agent).where(Agent.id == agent["id"])
+    res = await db.execute(stmt)
+    db_agent = res.scalar_one_or_none()
+    if not db_agent:
+        db_agent = Agent(
+            id=agent["id"],
+            organization_id=req.organization_id,
+            property_id=req.property_id,
+            name=req.name,
+            agent_type=req.agent_type,
+            status="ACTIVE",
+            description=f"Autonomous {req.agent_type} agent."
+        )
+        db.add(db_agent)
+
+    cfg_stmt = select(AgentConfig).where(AgentConfig.agent_id == agent["id"])
+    cfg_res = await db.execute(cfg_stmt)
+    db_cfg = cfg_res.scalar_one_or_none()
+    if not db_cfg:
+        db_cfg = AgentConfig(
+            id=f"cfg_{agent['id']}",
+            agent_id=agent["id"],
+            model_name="sarvam-2b",
+            system_prompt=req.system_prompt or "You are a helpful AI assistant.",
+            greeting="Welcome! How can I assist you today?",
+            enabled_tools=["search_property_information", "get_facility_status", "check_room_availability", "create_booking", "get_current_property_updates", "handoff_to_human"]
+        )
+        db.add(db_cfg)
+
+    await db.flush()
+
     if req.system_prompt:
         agent_sdk.configureAgent(agent["id"], system_prompt=req.system_prompt, tone=req.tone)
     return agent
+
+@app.put("/api/v1/agents/{agent_id}", tags=["Control Plane - Agents"])
+async def update_agent(agent_id: str, req: UpdateAgentConfigRequest, db: AsyncSession = Depends(get_db)):
+    stmt = select(Agent).where(Agent.id == agent_id)
+    res = await db.execute(stmt)
+    agt = res.scalar_one_or_none()
+    if not agt:
+        raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found.")
+    
+    if req.name:
+        agt.name = req.name
+    if req.status:
+        agt.status = req.status
+    if req.description:
+        agt.description = req.description
+
+    cfg_stmt = select(AgentConfig).where(AgentConfig.agent_id == agent_id)
+    cfg_res = await db.execute(cfg_stmt)
+    cfg = cfg_res.scalar_one_or_none()
+    if not cfg:
+        cfg = AgentConfig(
+            id=f"cfg_{agent_id}",
+            agent_id=agent_id,
+            model_name=req.model_name or "sarvam-2b",
+            system_prompt=req.system_prompt or "You are a helpful AI assistant.",
+            greeting=req.greeting or "Welcome! How can I assist you today?",
+            enabled_tools=req.enabled_tools or ["search_property_information", "get_facility_status", "check_room_availability", "create_booking", "get_current_property_updates", "handoff_to_human"]
+        )
+        db.add(cfg)
+    else:
+        if req.model_name:
+            cfg.model_name = req.model_name
+        if req.system_prompt is not None:
+            cfg.system_prompt = req.system_prompt
+        if req.greeting is not None:
+            cfg.greeting = req.greeting
+        if req.enabled_tools is not None:
+            cfg.enabled_tools = req.enabled_tools
+
+    await db.flush()
+    return {
+        "id": agt.id,
+        "name": agt.name,
+        "status": agt.status,
+        "config": {
+            "model_name": cfg.model_name,
+            "system_prompt": cfg.system_prompt,
+            "greeting": cfg.greeting,
+            "enabled_tools": cfg.enabled_tools
+        },
+        "message": "Agent configuration updated and saved."
+    }
+
 
 @app.get("/api/v1/agents", tags=["Control Plane - Agents"])
 async def list_agents(organization_id: Optional[str] = "org_azure_group", property_id: Optional[str] = None, db: AsyncSession = Depends(get_db)):
@@ -549,7 +645,7 @@ async def takeover_conversation(conversation_id: str, req: HumanTakeoverRequest,
 
 # --- KNOWLEDGE BASE & LIVE UPDATES ---
 @app.post("/api/v1/knowledge/documents", tags=["Knowledge Base RAG"])
-async def upload_knowledge_document(req: KnowledgeDocumentRequest):
+async def upload_knowledge_document(req: KnowledgeDocumentRequest, db: AsyncSession = Depends(get_db)):
     result = await rag_pipeline.ingest_document(
         title=req.title,
         content=req.content,
@@ -558,17 +654,58 @@ async def upload_knowledge_document(req: KnowledgeDocumentRequest):
         property_id=req.property_id,
         agent_id=req.agent_id
     )
+
+    doc_id = f"doc_{int(time.time()*1000)}"
+    doc = Document(
+        id=doc_id,
+        organization_id=req.organization_id,
+        property_id=req.property_id,
+        agent_id=req.agent_id,
+        title=req.title,
+        content_hash="",
+        file_type=req.document_type,
+        total_chunks=result.get("chunks_created", 1),
+        status="PROCESSED"
+    )
+    db.add(doc)
+    await db.flush()
+
+    result["id"] = doc_id
     return result
 
 @app.get("/api/v1/knowledge/documents", tags=["Knowledge Base RAG"])
-async def list_knowledge_documents(organization_id: str, property_id: Optional[str] = None, db: AsyncSession = Depends(get_db)):
+async def list_knowledge_documents(organization_id: str = "org_azure_group", property_id: Optional[str] = None, db: AsyncSession = Depends(get_db)):
     stmt = select(Document).where(Document.organization_id == organization_id)
+    if property_id:
+        stmt = stmt.where(Document.property_id == property_id)
     res = await db.execute(stmt)
     docs = res.scalars().all()
     return [
-        { "id": d.id, "title": d.title, "type": d.file_type, "chunks": d.total_chunks, "status": d.status }
+        { "id": d.id, "title": d.title, "type": d.file_type, "chunks": d.total_chunks, "status": d.status, "created_at": str(d.created_at) }
         for d in docs
     ]
+
+@app.delete("/api/v1/knowledge/documents/{document_id}", tags=["Knowledge Base RAG"])
+async def delete_knowledge_document(document_id: str, organization_id: str = "org_azure_group", property_id: str = "prop_azure_palm_resort", db: AsyncSession = Depends(get_db)):
+    stmt = select(Document).where(Document.id == document_id, Document.organization_id == organization_id)
+    res = await db.execute(stmt)
+    doc = res.scalar_one_or_none()
+    if doc:
+        await db.delete(doc)
+        await db.flush()
+
+    await rag_pipeline.delete_document(
+        document_id=document_id,
+        organization_id=organization_id,
+        property_id=property_id
+    )
+
+    return {
+        "document_id": document_id,
+        "deleted": True,
+        "message": "Document deleted from database and purged from RAG vector storage."
+    }
+
 
 class LiveEventBroadcaster:
     def __init__(self):
@@ -960,8 +1097,8 @@ async def get_integration_access_audit_logs(source_id: str, organization_id: str
 
 
 @app.delete("/api/v1/live-updates/integrations/{source_id}", tags=["Live Property Announcements"])
-async def delete_integration_source(source_id: str, db: AsyncSession = Depends(get_db)):
-    stmt = select(IntegrationSource).where(IntegrationSource.id == source_id)
+async def delete_integration_source(source_id: str, organization_id: str = "org_azure_group", db: AsyncSession = Depends(get_db)):
+    stmt = select(IntegrationSource).where(IntegrationSource.id == source_id, IntegrationSource.organization_id == organization_id)
     res = await db.execute(stmt)
     src = res.scalar_one_or_none()
     if src:
