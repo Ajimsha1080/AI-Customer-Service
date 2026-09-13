@@ -94,13 +94,13 @@ npm run dev -- -p 3001
 
 ## 🧪 Running Automated Tests
 
-Run the pytest suite to verify tenant data isolation, prompt injection guardrails, agent lifecycle transitions, and usage metering:
+Run the pytest suite to verify tenant data isolation, prompt injection guardrails, agent lifecycle transitions, RAG vector purging, reservation transactional consistency, ERP data access policies, embeddable widget serving, and usage metering:
 
 ```bash
 python -m pytest tests/
 ```
 
-**Result**: `5 passed in 1.30s` (**100% Pass Rate**).
+**Result**: `17 passed in 2.19s` (**100% Pass Rate** across 9 test modules).
 
 ---
 
