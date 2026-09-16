@@ -8,8 +8,14 @@ class Base(DeclarativeBase):
     pass
 
 # Engine initialization
+db_url = settings.DATABASE_URL
+if db_url.startswith("sqlite:///") and not db_url.startswith("sqlite+aiosqlite:///"):
+    db_url = db_url.replace("sqlite:///", "sqlite+aiosqlite:///")
+elif db_url.startswith("postgresql://") and not db_url.startswith("postgresql+asyncpg://"):
+    db_url = db_url.replace("postgresql://", "postgresql+asyncpg://")
+
 engine = create_async_engine(
-    settings.DATABASE_URL,
+    db_url,
     echo=settings.DEBUG,
     future=True,
     pool_pre_ping=True

@@ -3,11 +3,15 @@ import pytest_asyncio
 from httpx import AsyncClient, ASGITransport
 from apps.api.main import app, live_broadcaster
 
+from apps.api.auth import create_access_token
+
 @pytest.mark.asyncio
 async def test_super_admin_telemetry_endpoint():
     """Verify that Super Admin platform telemetry returns aggregated metrics and health status."""
+    sa_token = create_access_token({"sub": "usr_superadmin", "org_id": "org_azure_group", "role": "SUPER_ADMIN"})
+    headers = {"Authorization": f"Bearer {sa_token}"}
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
-        response = await ac.get("/api/v1/platform/telemetry")
+        response = await ac.get("/api/v1/platform/telemetry", headers=headers)
         assert response.status_code == 200
         data = response.json()
         assert "total_organizations" in data

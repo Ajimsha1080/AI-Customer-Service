@@ -18,6 +18,9 @@ ENV/
 *.sqlite
 *.log
 .env
+.env.*
+!.env.example
+
 
 # Antigravity system logs
 .system_generated/

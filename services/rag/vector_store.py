@@ -1,6 +1,13 @@
+import uuid
+import time
 import math
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional
+from sqlalchemy import select, delete
+from sqlalchemy.ext.asyncio import AsyncSession
+from services.database.session import AsyncSessionLocal
+from services.database.models import Document, DocumentChunk
+from services.rag.embeddings import BaseEmbeddingProvider, get_embedding_provider, MockEmbeddingProvider
 
 class VectorStoreInterface(ABC):
     @abstractmethod
@@ -11,89 +18,161 @@ class VectorStoreInterface(ABC):
     async def delete_document(self, document_id: str, organization_id: str, property_id: str) -> bool:
         pass
 
-class MockEmbeddings:
-    """Deterministic embedding generator for testing and offline development."""
-    def __init__(self, dimension: int = 384):
-        self.dimension = dimension
+    @abstractmethod
+    async def similarity_search(self, query: str, organization_id: str, property_id: str, agent_id: Optional[str] = None, top_k: int = 5) -> List[Dict[str, Any]]:
+        pass
 
-    def embed_text(self, text: str) -> List[float]:
-        # Hash text to seed vector
-        hash_val = sum(ord(c) for c in text)
-        vector = []
-        for i in range(self.dimension):
-            val = math.sin(hash_val * (i + 1))
-            vector.append(val)
-        # Normalize vector
-        norm = math.sqrt(sum(x * x for x in vector)) or 1.0
-        return [x / norm for x in vector]
+def cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
+    """Computes cosine similarity score between two float vectors."""
+    if not vec1 or not vec2 or len(vec1) != len(vec2):
+        return 0.0
+    dot_product = sum(a * b for a, b in zip(vec1, vec2))
+    norm_a = math.sqrt(sum(a * a for a in vec1)) or 1.0
+    norm_b = math.sqrt(sum(b * b for b in vec2)) or 1.0
+    return dot_product / (norm_a * norm_b)
 
 class PostgresPgVectorStore(VectorStoreInterface):
-    def __init__(self, db_session=None):
+    """Real Database-backed Vector Store supporting persistent storage and semantic similarity search.
+    Persists documents and vector embeddings into the database (documents and document_chunks tables),
+    ensuring documents survive application restarts.
+    """
+    def __init__(self, db_session: Optional[AsyncSession] = None, embedder: Optional[BaseEmbeddingProvider] = None):
         self.db_session = db_session
-        self.embedder = MockEmbeddings()
-        # In-memory document index fallback when direct pgvector extension is unconfigured
-        self._in_memory_store: List[Dict[str, Any]] = []
+        self.embedder = embedder or get_embedding_provider()
+
+    async def _get_session(self):
+        if self.db_session:
+            return self.db_session, False
+        return AsyncSessionLocal(), True
 
     async def add_documents(self, documents: List[Dict[str, Any]], organization_id: str, property_id: str, agent_id: Optional[str] = None) -> List[str]:
+        session, is_local_session = await self._get_session()
         added_ids = []
-        for doc in documents:
-            content = doc.get("content", "")
-            doc_id = doc.get("id", f"chunk_{len(self._in_memory_store) + 1}")
-            embedding = self.embedder.embed_text(content)
-            entry = {
-                "id": doc_id,
-                "content": content,
-                "embedding": embedding,
-                "organization_id": organization_id,
-                "property_id": property_id,
-                "agent_id": agent_id,
-                "metadata": doc.get("metadata", {})
-            }
-            self._in_memory_store.append(entry)
-            added_ids.append(doc_id)
-        return added_ids
+
+        try:
+            for doc in documents:
+                content = doc.get("content", "")
+                doc_id = doc.get("id") or f"chunk_{uuid.uuid4().hex[:12]}"
+                metadata = doc.get("metadata", {})
+                title = metadata.get("title") or doc.get("title") or "Untitled Document"
+                document_type = metadata.get("document_type", "txt")
+
+                embedding = self.embedder.embed_text(content)
+
+                # Find or create parent Document record
+                parent_doc_id = f"doc_{organization_id}_{title.lower().replace(' ', '_')}"
+                stmt = select(Document).where(Document.id == parent_doc_id)
+                res = await session.execute(stmt)
+                db_doc = res.scalar_one_or_none()
+
+                if not db_doc:
+                    db_doc = Document(
+                        id=parent_doc_id,
+                        organization_id=organization_id,
+                        property_id=property_id,
+                        agent_id=agent_id,
+                        title=title,
+                        document_type=document_type,
+                        content_raw=content
+                    )
+                    session.add(db_doc)
+                    await session.flush()
+
+                # Delete existing chunk if chunk with doc_id already exists (re-indexing support)
+                stmt_del = select(DocumentChunk).where(DocumentChunk.id == doc_id)
+                res_del = await session.execute(stmt_del)
+                existing_chunk = res_del.scalar_one_or_none()
+                if existing_chunk:
+                    await session.delete(existing_chunk)
+                    await session.flush()
+
+                # Add DocumentChunk record
+                chunk = DocumentChunk(
+                    id=doc_id,
+                    document_id=db_doc.id,
+                    content=content,
+                    embedding_json=embedding,
+                    metadata_json={
+                        "title": title,
+                        "document_type": document_type,
+                        "organization_id": organization_id,
+                        "property_id": property_id,
+                        "agent_id": agent_id,
+                        **metadata
+                    }
+                )
+                session.add(chunk)
+                added_ids.append(doc_id)
+
+            await session.commit()
+            return added_ids
+        except Exception as e:
+            await session.rollback()
+            raise e
+        finally:
+            if is_local_session:
+                await session.close()
 
     async def delete_document(self, document_id: str, organization_id: str, property_id: str) -> bool:
-        initial_len = len(self._in_memory_store)
-        doc_id_normalized = document_id.replace(' ', '_')
-        self._in_memory_store = [
-            item for item in self._in_memory_store
-            if not (
-                item["organization_id"] == organization_id and
-                item["property_id"] == property_id and
-                (
-                    item["metadata"].get("document_id") == document_id or
-                    item["metadata"].get("title") == document_id or
-                    doc_id_normalized in item["id"] or
-                    document_id in item["id"]
-                )
+        session, is_local_session = await self._get_session()
+        try:
+            # Find documents matching ID
+            stmt = select(Document).where(
+                Document.organization_id == organization_id,
+                Document.property_id == property_id
             )
-        ]
-        return len(self._in_memory_store) < initial_len
+            res = await session.execute(stmt)
+            docs = res.scalars().all()
 
+            target_docs = [
+                d for d in docs
+                if d.id == document_id or document_id in d.id or document_id.replace(' ', '_') in d.id or d.title == document_id
+            ]
+
+            if not target_docs:
+                return False
+
+            for target in target_docs:
+                await session.delete(target)
+
+            await session.commit()
+            return True
+        except Exception:
+            await session.rollback()
+            return False
+        finally:
+            if is_local_session:
+                await session.close()
 
     async def similarity_search(self, query: str, organization_id: str, property_id: str, agent_id: Optional[str] = None, top_k: int = 5) -> List[Dict[str, Any]]:
+        session, is_local_session = await self._get_session()
         query_vec = self.embedder.embed_text(query)
-        results = []
 
-        for item in self._in_memory_store:
-            # STRICT TENANT ISOLATION FILTERING
-            if item["organization_id"] != organization_id:
-                continue
-            if item["property_id"] != property_id:
-                continue
-            if agent_id and item.get("agent_id") and item["agent_id"] != agent_id:
-                continue
+        try:
+            stmt = select(DocumentChunk).join(Document, DocumentChunk.document_id == Document.id).where(
+                Document.organization_id == organization_id,
+                Document.property_id == property_id
+            )
+            if agent_id:
+                stmt = stmt.where((Document.agent_id == agent_id) | (Document.agent_id.is_(None)))
 
-            # Compute Cosine Similarity
-            dot_product = sum(a * b for a, b in zip(query_vec, item["embedding"]))
-            results.append({
-                "id": item["id"],
-                "content": item["content"],
-                "score": dot_product,
-                "metadata": item["metadata"]
-            })
+            res = await session.execute(stmt)
+            chunks = res.scalars().all()
 
-        # Sort by similarity score descending
-        results.sort(key=lambda x: x["score"], reverse=True)
-        return results[:top_k]
+            results = []
+            for chunk in chunks:
+                if not chunk.embedding_json:
+                    continue
+                score = cosine_similarity(query_vec, chunk.embedding_json)
+                results.append({
+                    "id": chunk.id,
+                    "content": chunk.content,
+                    "score": score,
+                    "metadata": chunk.metadata_json or {}
+                })
+
+            results.sort(key=lambda x: x["score"], reverse=True)
+            return results[:top_k]
+        finally:
+            if is_local_session:
+                await session.close()

@@ -1,11 +1,13 @@
 import time
 import os
+import uuid
 import io
 import wave
 import math
 import struct
 import base64
 from datetime import datetime, timezone
+import logging
 import httpx
 from dotenv import load_dotenv
 load_dotenv()
@@ -14,6 +16,7 @@ load_dotenv()
 import asyncio
 import json
 from fastapi import FastAPI, HTTPException, Request, Depends, status
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, EmailStr
@@ -27,12 +30,16 @@ from services.agent_runtime.engine import AgentRuntimeEngine
 from services.rag.pipeline import RAGPipeline
 from services.billing.metering import UsageMeteringService
 from services.database.session import get_db, AsyncSessionLocal
-from services.database.models import Organization, Property, Agent, AgentConfig, LiveUpdate, Conversation, Document, Room, Facility, UsageEvent, Message, IntegrationSource, AuditLog, DataAccessPolicy
+from services.database.models import Organization, Property, Agent, AgentConfig, LiveUpdate, Conversation, Document, Room, Facility, UsageEvent, Message, IntegrationSource, AuditLog, DataAccessPolicy, User, UserRole
+from apps.api.auth import (
+    hash_password, verify_password, create_access_token, create_refresh_token,
+    decode_access_token, decode_refresh_token, get_current_user, get_current_org_user,
+    get_super_admin_user, get_optional_current_user, verify_tenant_access
+)
 
 from contextlib import asynccontextmanager
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
+async def init_db_and_seed():
     """Ensure database tables and real initial seed records exist for Super Admin control plane."""
     from services.database.session import engine, Base
     async with engine.begin() as conn:
@@ -63,7 +70,39 @@ async def lifespan(app: FastAPI):
             agt = Agent(id="agt_hostel_01", organization_id="org_azure_group", property_id="prop_azure_palm_resort", name="Hostel AI Agent", agent_type="HOSTEL_AI_AGENT", status="ACTIVE", description="Autonomous Hostel & Hospitality AI Agent that understands guest questions, decides required tools, executes database actions, and responds in real-time.")
             session.add(agt)
 
-        # 4. UsageEvent
+        # 4. User
+        stmt_usr = select(User).where(User.id == "usr_demo123")
+        res_usr = await session.execute(stmt_usr)
+        usr = res_usr.scalar_one_or_none()
+        if not usr:
+            usr = User(
+                id="usr_demo123",
+                organization_id="org_azure_group",
+                email="admin@azurehostel.com",
+                hashed_password=hash_password("admin123"),
+                full_name="Azure Group Admin",
+                role=UserRole.ORGANIZATION_ADMIN,
+                is_active=True
+            )
+            session.add(usr)
+
+        # 4b. Platform Super Admin User
+        stmt_sa = select(User).where(User.id == "usr_superadmin")
+        res_sa = await session.execute(stmt_sa)
+        sa = res_sa.scalar_one_or_none()
+        if not sa:
+            sa = User(
+                id="usr_superadmin",
+                organization_id="org_azure_group",
+                email="superadmin@azurehostel.com",
+                hashed_password=hash_password("superadmin123"),
+                full_name="Platform Super Admin",
+                role=UserRole.SUPER_ADMIN,
+                is_active=True
+            )
+            session.add(sa)
+
+        # 5. UsageEvent
         stmt_evt = select(UsageEvent).where(UsageEvent.organization_id == "org_azure_group")
         res_evt = await session.execute(stmt_evt)
         evts = res_evt.scalars().all()
@@ -72,6 +111,11 @@ async def lifespan(app: FastAPI):
             session.add(UsageEvent(id="evt_02", organization_id="org_azure_group", property_id="prop_azure_palm_resort", agent_id="agt_hostel_01", event_type="llm_generation", provider="sarvam", quantity=2100, estimated_cost=0.0042))
 
         await session.commit()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Ensure database tables and real initial seed records exist for Super Admin control plane."""
+    await init_db_and_seed()
     yield
 
 app = FastAPI(
@@ -83,10 +127,10 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# CORS configuration for Embeddable Web Widget & Admin App
+# CORS configuration for Embeddable Web Widget & Admin App (Explicit Allowlist)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -98,15 +142,60 @@ runtime_engine = AgentRuntimeEngine()
 rag_pipeline = RAGPipeline()
 metering_service = UsageMeteringService()
 
-# Global Error Handler
+logger = logging.getLogger("hospitality_api")
+
+@app.middleware("http")
+async def request_id_and_logging_middleware(request: Request, call_next):
+    request_id = request.headers.get("X-Request-ID") or f"req_{uuid.uuid4().hex[:12]}"
+    request.state.request_id = request_id
+
+    start_time = time.time()
+    response = await call_next(request)
+    latency_ms = round((time.time() - start_time) * 1000, 2)
+
+    response.headers["X-Request-ID"] = request_id
+
+    log_entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "request_id": request_id,
+        "method": request.method,
+        "path": request.url.path,
+        "status_code": response.status_code,
+        "latency_ms": latency_ms
+    }
+    logger.info(json.dumps(log_entry))
+    return response
+
+@app.exception_handler(HTTPException)
+@app.exception_handler(StarletteHTTPException)
+async def custom_http_exception_handler(request: Request, exc: Exception):
+    status_code = getattr(exc, "status_code", 400)
+    detail = getattr(exc, "detail", str(exc))
+    request_id = getattr(request.state, "request_id", f"req_{uuid.uuid4().hex[:12]}")
+    return JSONResponse(
+        status_code=status_code,
+        headers={"X-Request-ID": request_id},
+        content={
+            "detail": str(detail),
+            "error": {
+                "code": "HTTP_ERROR",
+                "status_code": status_code,
+                "message": str(detail),
+                "request_id": request_id
+            }
+        }
+    )
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    request_id = f"req_{int(time.time()*1000)}"
+    request_id = getattr(request.state, "request_id", f"req_{uuid.uuid4().hex[:12]}")
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        headers={"X-Request-ID": request_id},
         content={
             "error": {
                 "code": "INTERNAL_SERVER_ERROR",
+                "status_code": 500,
                 "message": "An unexpected system error occurred. Our operations team has been notified.",
                 "request_id": request_id
             }
@@ -116,11 +205,27 @@ async def global_exception_handler(request: Request, exc: Exception):
 # --- HEALTH & OBSERVABILITY ENDPOINTS ---
 @app.get("/health", tags=["Health"])
 async def health_check():
-    return {"status": "healthy", "service": settings.PROJECT_NAME, "environment": settings.ENVIRONMENT}
+    return {
+        "status": "healthy",
+        "service": settings.PROJECT_NAME,
+        "environment": settings.ENVIRONMENT,
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
 
 @app.get("/ready", tags=["Health"])
-async def readiness_check():
-    return {"status": "ready", "database": "connected", "redis": "connected", "vector_store": "pgvector_ready"}
+async def readiness_check(db: AsyncSession = Depends(get_db)):
+    db_status = "connected"
+    try:
+        await db.execute(select(1))
+    except Exception:
+        db_status = "degraded"
+
+    return {
+        "status": "ready" if db_status == "connected" else "degraded",
+        "database": db_status,
+        "redis": "connected",
+        "vector_store": "pgvector_ready"
+    }
 
 @app.get("/metrics", tags=["Health"])
 async def metrics(db: AsyncSession = Depends(get_db)):
@@ -142,6 +247,16 @@ class LoginRequest(BaseModel):
     email: str
     password: str
 
+class RegisterRequest(BaseModel):
+    email: str
+    password: str
+    full_name: str
+    organization_name: Optional[str] = "Azure Palm Hospitality Group"
+    organization_slug: Optional[str] = "azure-palm-group"
+
+class RefreshTokenRequest(BaseModel):
+    refresh_token: str
+
 class CreateOrgRequest(BaseModel):
     name: str
     slug: str
@@ -159,6 +274,9 @@ class CreateAgentRequest(BaseModel):
     agent_type: str = "CONCIERGE"
     system_prompt: Optional[str] = None
     tone: Optional[str] = "Friendly, Professional, Courteous"
+
+class PlanUpgradeRequest(BaseModel):
+    plan_name: str
 
 class UpdateAgentConfigRequest(BaseModel):
     name: Optional[str] = None
@@ -225,22 +343,135 @@ class HumanTakeoverRequest(BaseModel):
     reason: Optional[str] = "Manual Staff Takeover Initiated"
 
 # --- AUTH & TENANT MANAGEMENT ---
-@app.post("/api/v1/auth/login", tags=["Auth"])
-async def login(req: LoginRequest):
+@app.post("/api/v1/auth/register", tags=["Auth"])
+async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
+    stmt = select(User).where(User.email == req.email)
+    res = await db.execute(stmt)
+    if res.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email is already registered"
+        )
+
+    slug = req.organization_slug or (req.organization_name.lower().replace(" ", "-") if req.organization_name else "default-org")
+    stmt_org = select(Organization).where(Organization.slug == slug)
+    res_org = await db.execute(stmt_org)
+    org = res_org.scalar_one_or_none()
+    if not org:
+        org_id = f"org_{slug.replace('-', '_')}"
+        org = Organization(
+            id=org_id,
+            name=req.organization_name or "Default Organization",
+            slug=slug,
+            status="active"
+        )
+        db.add(org)
+        await db.flush()
+
+    user_id = f"usr_{int(time.time()*1000)}"
+    user = User(
+        id=user_id,
+        organization_id=org.id,
+        email=req.email,
+        hashed_password=hash_password(req.password),
+        full_name=req.full_name,
+        role=UserRole.ORGANIZATION_ADMIN,
+        is_active=True
+    )
+    db.add(user)
+    await db.flush()
+
+    access_token = create_access_token({"sub": user.id, "org_id": user.organization_id, "role": user.role})
+    refresh_token = create_refresh_token({"sub": user.id})
+
     return {
-        "access_token": "jwt_token_demo_azure_hospitality_admin",
+        "access_token": access_token,
+        "refresh_token": refresh_token,
         "token_type": "bearer",
         "user": {
-            "id": "usr_demo123",
-            "email": req.email,
-            "full_name": "Azure Group Admin",
-            "role": "ORGANIZATION_ADMIN",
-            "organization_id": "org_azure_group"
+            "id": user.id,
+            "email": user.email,
+            "full_name": user.full_name,
+            "role": user.role,
+            "organization_id": user.organization_id
         }
     }
 
+class LogoutRequest(BaseModel):
+    refresh_token: str
+
+@app.post("/api/v1/auth/login", tags=["Auth"])
+async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
+    stmt = select(User).where(User.email == req.email)
+    res = await db.execute(stmt)
+    user = res.scalar_one_or_none()
+    if not user or not verify_password(req.password, user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid credentials"
+        )
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User account is deactivated"
+        )
+
+    access_token = create_access_token({"sub": user.id, "org_id": user.organization_id, "role": user.role})
+    refresh_token = create_refresh_token({"sub": user.id})
+
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer",
+        "user": {
+            "id": user.id,
+            "email": user.email,
+            "full_name": user.full_name,
+            "role": user.role,
+            "organization_id": user.organization_id
+        }
+    }
+
+@app.post("/api/v1/auth/logout", tags=["Auth"])
+async def logout(req: LogoutRequest):
+    from apps.api.auth import REFRESH_TOKEN_DENYLIST
+    REFRESH_TOKEN_DENYLIST.add(req.refresh_token)
+    return {"message": "Successfully logged out and token invalidated."}
+
+@app.post("/api/v1/auth/refresh", tags=["Auth"])
+async def refresh(req: RefreshTokenRequest, db: AsyncSession = Depends(get_db)):
+    payload = decode_refresh_token(req.refresh_token)
+    user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token")
+    
+    stmt = select(User).where(User.id == user_id)
+    res = await db.execute(stmt)
+    user = res.scalar_one_or_none()
+    if not user or not user.is_active:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User account not found or deactivated")
+
+    new_access_token = create_access_token({"sub": user.id, "org_id": user.organization_id, "role": user.role})
+    new_refresh_token = create_refresh_token({"sub": user.id})
+
+    return {
+        "access_token": new_access_token,
+        "refresh_token": new_refresh_token,
+        "token_type": "bearer"
+    }
+
+@app.get("/api/v1/auth/me", tags=["Auth"])
+async def get_me(current_user: User = Depends(get_current_user)):
+    return {
+        "id": current_user.id,
+        "email": current_user.email,
+        "full_name": current_user.full_name,
+        "role": current_user.role,
+        "organization_id": current_user.organization_id
+    }
+
 @app.post("/api/v1/organizations", tags=["Control Plane - Organizations"])
-async def create_organization(req: CreateOrgRequest, db: AsyncSession = Depends(get_db)):
+async def create_organization(req: CreateOrgRequest, current_user: User = Depends(get_super_admin_user), db: AsyncSession = Depends(get_db)):
     org_id = f"org_{req.slug}"
     org = Organization(id=org_id, name=req.name, slug=req.slug, status="active")
     db.add(org)
@@ -254,8 +485,11 @@ async def create_organization(req: CreateOrgRequest, db: AsyncSession = Depends(
     }
 
 @app.get("/api/v1/organizations", tags=["Control Plane - Organizations"])
-async def list_organizations(db: AsyncSession = Depends(get_db)):
-    stmt = select(Organization)
+async def list_organizations(limit: int = 50, offset: int = 0, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    if current_user.role == UserRole.SUPER_ADMIN:
+        stmt = select(Organization).limit(limit).offset(offset)
+    else:
+        stmt = select(Organization).where(Organization.id == current_user.organization_id).limit(limit).offset(offset)
     res = await db.execute(stmt)
     orgs = res.scalars().all()
     return [
@@ -264,9 +498,11 @@ async def list_organizations(db: AsyncSession = Depends(get_db)):
     ]
 
 @app.post("/api/v1/properties", tags=["Control Plane - Properties"])
-async def create_property(req: CreatePropertyRequest, db: AsyncSession = Depends(get_db)):
+async def create_property(req: CreatePropertyRequest, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    target_org = req.organization_id or current_user.organization_id
+    org_id = verify_tenant_access(current_user, target_org)
     prop_id = f"prop_{req.name.lower().replace(' ', '_')}"
-    prop = Property(id=prop_id, organization_id=req.organization_id, name=req.name, property_type=req.property_type, timezone=req.timezone, status="active")
+    prop = Property(id=prop_id, organization_id=org_id, name=req.name, property_type=req.property_type, timezone=req.timezone, status="active")
     db.add(prop)
     await db.flush()
     return {
@@ -278,8 +514,9 @@ async def create_property(req: CreatePropertyRequest, db: AsyncSession = Depends
     }
 
 @app.get("/api/v1/properties", tags=["Control Plane - Properties"])
-async def list_properties(organization_id: Optional[str] = "org_azure_group", db: AsyncSession = Depends(get_db)):
-    stmt = select(Property).where(Property.organization_id == organization_id)
+async def list_properties(organization_id: Optional[str] = None, limit: int = 50, offset: int = 0, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    org_id = verify_tenant_access(current_user, organization_id)
+    stmt = select(Property).where(Property.organization_id == org_id).limit(limit).offset(offset)
     res = await db.execute(stmt)
     props = res.scalars().all()
     return [
@@ -288,12 +525,13 @@ async def list_properties(organization_id: Optional[str] = "org_azure_group", db
     ]
 
 @app.get("/api/v1/properties/{property_id}", tags=["Control Plane - Properties"])
-async def get_property_details(property_id: str, db: AsyncSession = Depends(get_db)):
+async def get_property_details(property_id: str, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     stmt = select(Property).where(Property.id == property_id)
     res = await db.execute(stmt)
     prop = res.scalar_one_or_none()
     if not prop:
         raise HTTPException(status_code=404, detail="Property not found")
+    verify_tenant_access(current_user, prop.organization_id)
     return {
         "id": prop.id,
         "organization_id": prop.organization_id,
@@ -305,9 +543,15 @@ async def get_property_details(property_id: str, db: AsyncSession = Depends(get_
 
 # --- AGENT CONTROL PLANE & LIFECYCLE ---
 @app.post("/api/v1/agents", tags=["Control Plane - Agents"])
-async def create_agent(req: CreateAgentRequest, db: AsyncSession = Depends(get_db)):
+async def create_agent(req: CreateAgentRequest, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    org_id = verify_tenant_access(current_user, req.organization_id)
+
+    allowed, reason, details = await metering_service.check_billing_quota(org_id, resource="agent_creation", db=db)
+    if not allowed:
+        raise HTTPException(status_code=status.HTTP_402_PAYMENT_REQUIRED, detail=f"Billing quota exceeded: {reason}")
+
     agent = agent_sdk.createAgent(
-        organization_id=req.organization_id,
+        organization_id=org_id,
         property_id=req.property_id,
         name=req.name,
         agent_type=req.agent_type
@@ -318,7 +562,7 @@ async def create_agent(req: CreateAgentRequest, db: AsyncSession = Depends(get_d
     if not db_agent:
         db_agent = Agent(
             id=agent["id"],
-            organization_id=req.organization_id,
+            organization_id=org_id,
             property_id=req.property_id,
             name=req.name,
             agent_type=req.agent_type,
@@ -348,12 +592,13 @@ async def create_agent(req: CreateAgentRequest, db: AsyncSession = Depends(get_d
     return agent
 
 @app.put("/api/v1/agents/{agent_id}", tags=["Control Plane - Agents"])
-async def update_agent(agent_id: str, req: UpdateAgentConfigRequest, db: AsyncSession = Depends(get_db)):
+async def update_agent(agent_id: str, req: UpdateAgentConfigRequest, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     stmt = select(Agent).where(Agent.id == agent_id)
     res = await db.execute(stmt)
     agt = res.scalar_one_or_none()
     if not agt:
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found.")
+    verify_tenant_access(current_user, agt.organization_id)
     
     if req.name:
         agt.name = req.name
@@ -399,12 +644,13 @@ async def update_agent(agent_id: str, req: UpdateAgentConfigRequest, db: AsyncSe
         "message": "Agent configuration updated and saved."
     }
 
-
 @app.get("/api/v1/agents", tags=["Control Plane - Agents"])
-async def list_agents(organization_id: Optional[str] = "org_azure_group", property_id: Optional[str] = None, db: AsyncSession = Depends(get_db)):
-    stmt = select(Agent).where(Agent.organization_id == organization_id)
+async def list_agents(organization_id: Optional[str] = None, property_id: Optional[str] = None, limit: int = 50, offset: int = 0, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    org_id = verify_tenant_access(current_user, organization_id)
+    stmt = select(Agent).where(Agent.organization_id == org_id)
     if property_id:
         stmt = stmt.where(Agent.property_id == property_id)
+    stmt = stmt.limit(limit).offset(offset)
     res = await db.execute(stmt)
     agents = res.scalars().all()
     if agents:
@@ -415,7 +661,7 @@ async def list_agents(organization_id: Optional[str] = "org_azure_group", proper
     return [
         {
             "id": "agt_hostel_01",
-            "organization_id": "org_azure_group",
+            "organization_id": org_id,
             "property_id": "prop_azure_palm_resort",
             "name": "Hostel AI Agent",
             "agent_type": "HOSTEL_AI_AGENT",
@@ -425,12 +671,13 @@ async def list_agents(organization_id: Optional[str] = "org_azure_group", proper
     ]
 
 @app.get("/api/v1/agents/{agent_id}", tags=["Control Plane - Agents"])
-async def get_agent(agent_id: str, db: AsyncSession = Depends(get_db)):
+async def get_agent(agent_id: str, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     stmt = select(Agent).where(Agent.id == agent_id)
     res = await db.execute(stmt)
     agent = res.scalar_one_or_none()
     if not agent:
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found.")
+    verify_tenant_access(current_user, agent.organization_id)
     
     cfg_stmt = select(AgentConfig).where(AgentConfig.agent_id == agent_id)
     cfg_res = await db.execute(cfg_stmt)
@@ -454,29 +701,33 @@ async def get_agent(agent_id: str, db: AsyncSession = Depends(get_db)):
     }
 
 @app.post("/api/v1/agents/{agent_id}/validate", tags=["Control Plane - Agent Lifecycle"])
-async def validate_agent(agent_id: str):
+async def validate_agent(agent_id: str, current_user: User = Depends(get_current_user)):
     valid, msg = await agent_sdk.validateAgent(agent_id)
     return {"agent_id": agent_id, "is_valid": valid, "message": msg}
 
 @app.post("/api/v1/agents/{agent_id}/deploy", tags=["Control Plane - Agent Lifecycle"])
-async def deploy_agent(agent_id: str):
+async def deploy_agent(agent_id: str, current_user: User = Depends(get_current_user)):
     return await agent_sdk.deployAgent(agent_id)
 
 @app.post("/api/v1/agents/{agent_id}/pause", tags=["Control Plane - Agent Lifecycle"])
-async def pause_agent(agent_id: str):
+async def pause_agent(agent_id: str, current_user: User = Depends(get_current_user)):
     return await agent_sdk.pauseAgent(agent_id)
 
 @app.post("/api/v1/agents/{agent_id}/resume", tags=["Control Plane - Agent Lifecycle"])
-async def resume_agent(agent_id: str):
+async def resume_agent(agent_id: str, current_user: User = Depends(get_current_user)):
     return await agent_sdk.resumeAgent(agent_id)
 
 @app.post("/api/v1/agents/{agent_id}/disable", tags=["Control Plane - Agent Lifecycle"])
-async def disable_agent(agent_id: str):
+async def disable_agent(agent_id: str, current_user: User = Depends(get_current_user)):
     return await agent_sdk.disableAgent(agent_id)
 
 # --- DATA PLANE: REAL-TIME AGENT EXECUTION ---
 @app.post("/api/v1/agents/{agent_id}/chat", tags=["Data Plane - Agent Execution"])
 async def agent_chat(agent_id: str, req: AgentChatRequest, db: AsyncSession = Depends(get_db)):
+    allowed, reason, details = await metering_service.check_billing_quota(req.organization_id, resource="agent_turn", db=db)
+    if not allowed:
+        raise HTTPException(status_code=status.HTTP_402_PAYMENT_REQUIRED, detail=f"Billing quota exceeded: {reason}")
+
     cfg_stmt = select(AgentConfig).where(AgentConfig.agent_id == agent_id)
     cfg_res = await db.execute(cfg_stmt)
     config = cfg_res.scalar_one_or_none()
@@ -505,14 +756,15 @@ async def agent_chat(agent_id: str, req: AgentChatRequest, db: AsyncSession = De
         language=req.language or "English"
     )
 
-    # Live usage event recording
-    metering_service.record_usage_event(
+    # Live usage event recording directly into DB
+    await metering_service.record_usage_event_async(
         organization_id=req.organization_id,
         property_id=req.property_id,
         agent_id=agent_id,
-        event_type="chat_message",
-        quantity=result["tokens_used"],
-        unit="tokens"
+        event_type="agent_turn",
+        quantity=result.get("tokens_used", 45),
+        unit="tokens",
+        db=db
     )
 
     return result
@@ -615,10 +867,12 @@ async def text_to_speech_gateway(req: TTSRequest):
 
 # --- CONVERSATIONS & HUMAN TAKEOVER ---
 @app.get("/api/v1/conversations", tags=["Staff Inbox & Conversations"])
-async def list_conversations(organization_id: str, property_id: Optional[str] = None, db: AsyncSession = Depends(get_db)):
-    stmt = select(Conversation).where(Conversation.organization_id == organization_id)
+async def list_conversations(organization_id: Optional[str] = None, property_id: Optional[str] = None, limit: int = 50, offset: int = 0, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    org_id = verify_tenant_access(current_user, organization_id)
+    stmt = select(Conversation).where(Conversation.organization_id == org_id)
     if property_id:
         stmt = stmt.where(Conversation.property_id == property_id)
+    stmt = stmt.limit(limit).offset(offset)
     res = await db.execute(stmt)
     convs = res.scalars().all()
     return [
@@ -627,11 +881,12 @@ async def list_conversations(organization_id: str, property_id: Optional[str] = 
     ]
 
 @app.post("/api/v1/conversations/{conversation_id}/takeover", tags=["Staff Inbox & Conversations"])
-async def takeover_conversation(conversation_id: str, req: HumanTakeoverRequest, db: AsyncSession = Depends(get_db)):
+async def takeover_conversation(conversation_id: str, req: HumanTakeoverRequest, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     stmt = select(Conversation).where(Conversation.id == conversation_id)
     res = await db.execute(stmt)
     conv = res.scalar_one_or_none()
     if conv:
+        verify_tenant_access(current_user, conv.organization_id)
         conv.status = "HUMAN_STAFF_TAKEN_OVER"
         conv.is_human_takeover = True
         await db.flush()
@@ -645,12 +900,18 @@ async def takeover_conversation(conversation_id: str, req: HumanTakeoverRequest,
 
 # --- KNOWLEDGE BASE & LIVE UPDATES ---
 @app.post("/api/v1/knowledge/documents", tags=["Knowledge Base RAG"])
-async def upload_knowledge_document(req: KnowledgeDocumentRequest, db: AsyncSession = Depends(get_db)):
+async def upload_knowledge_document(req: KnowledgeDocumentRequest, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    org_id = verify_tenant_access(current_user, req.organization_id)
+
+    allowed, reason, details = await metering_service.check_billing_quota(org_id, resource="document_upload", db=db)
+    if not allowed:
+        raise HTTPException(status_code=status.HTTP_402_PAYMENT_REQUIRED, detail=f"Billing quota exceeded: {reason}")
+
     result = await rag_pipeline.ingest_document(
         title=req.title,
         content=req.content,
         document_type=req.document_type,
-        organization_id=req.organization_id,
+        organization_id=org_id,
         property_id=req.property_id,
         agent_id=req.agent_id
     )
@@ -658,7 +919,7 @@ async def upload_knowledge_document(req: KnowledgeDocumentRequest, db: AsyncSess
     doc_id = f"doc_{int(time.time()*1000)}"
     doc = Document(
         id=doc_id,
-        organization_id=req.organization_id,
+        organization_id=org_id,
         property_id=req.property_id,
         agent_id=req.agent_id,
         title=req.title,
@@ -670,14 +931,26 @@ async def upload_knowledge_document(req: KnowledgeDocumentRequest, db: AsyncSess
     db.add(doc)
     await db.flush()
 
+    await metering_service.record_usage_event_async(
+        organization_id=org_id,
+        property_id=req.property_id,
+        agent_id=req.agent_id or "agt_001",
+        event_type="document_upload",
+        quantity=result.get("chunks_created", 1),
+        unit="documents",
+        db=db
+    )
+
     result["id"] = doc_id
     return result
 
 @app.get("/api/v1/knowledge/documents", tags=["Knowledge Base RAG"])
-async def list_knowledge_documents(organization_id: str = "org_azure_group", property_id: Optional[str] = None, db: AsyncSession = Depends(get_db)):
-    stmt = select(Document).where(Document.organization_id == organization_id)
+async def list_knowledge_documents(organization_id: Optional[str] = None, property_id: Optional[str] = None, limit: int = 50, offset: int = 0, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    org_id = verify_tenant_access(current_user, organization_id)
+    stmt = select(Document).where(Document.organization_id == org_id)
     if property_id:
         stmt = stmt.where(Document.property_id == property_id)
+    stmt = stmt.limit(limit).offset(offset)
     res = await db.execute(stmt)
     docs = res.scalars().all()
     return [
@@ -686,8 +959,9 @@ async def list_knowledge_documents(organization_id: str = "org_azure_group", pro
     ]
 
 @app.delete("/api/v1/knowledge/documents/{document_id}", tags=["Knowledge Base RAG"])
-async def delete_knowledge_document(document_id: str, organization_id: str = "org_azure_group", property_id: str = "prop_azure_palm_resort", db: AsyncSession = Depends(get_db)):
-    stmt = select(Document).where(Document.id == document_id, Document.organization_id == organization_id)
+async def delete_knowledge_document(document_id: str, organization_id: Optional[str] = None, property_id: str = "prop_azure_palm_resort", current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    org_id = verify_tenant_access(current_user, organization_id)
+    stmt = select(Document).where(Document.id == document_id, Document.organization_id == org_id)
     res = await db.execute(stmt)
     doc = res.scalar_one_or_none()
     if doc:
@@ -696,7 +970,7 @@ async def delete_knowledge_document(document_id: str, organization_id: str = "or
 
     await rag_pipeline.delete_document(
         document_id=document_id,
-        organization_id=organization_id,
+        organization_id=org_id,
         property_id=property_id
     )
 
@@ -705,7 +979,6 @@ async def delete_knowledge_document(document_id: str, organization_id: str = "or
         "deleted": True,
         "message": "Document deleted from database and purged from RAG vector storage."
     }
-
 
 class LiveEventBroadcaster:
     def __init__(self):
@@ -730,12 +1003,13 @@ class LiveEventBroadcaster:
 live_broadcaster = LiveEventBroadcaster()
 
 @app.get("/api/v1/live-updates/events", tags=["Live Property Announcements"])
-async def live_updates_event_stream(organization_id: str, property_id: str):
+async def live_updates_event_stream(organization_id: Optional[str] = None, property_id: str = "prop_azure_palm_resort", current_user: User = Depends(get_current_user)):
     """Server-Sent Events (SSE) stream for real-time live info broadcasts."""
+    org_id = verify_tenant_access(current_user, organization_id)
     async def event_generator():
         q = await live_broadcaster.subscribe()
         try:
-            yield f"data: {json.dumps({'type': 'CONNECTED', 'organization_id': organization_id, 'property_id': property_id, 'timestamp': str(time.time())})}\n\n"
+            yield f"data: {json.dumps({'type': 'CONNECTED', 'organization_id': org_id, 'property_id': property_id, 'timestamp': str(time.time())})}\n\n"
             while True:
                 data = await q.get()
                 yield f"data: {json.dumps(data)}\n\n"
@@ -745,11 +1019,12 @@ async def live_updates_event_stream(organization_id: str, property_id: str):
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 @app.post("/api/v1/live-updates", tags=["Live Property Announcements"])
-async def create_live_update(req: LiveUpdateRequest, db: AsyncSession = Depends(get_db)):
+async def create_live_update(req: LiveUpdateRequest, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    org_id = verify_tenant_access(current_user, req.organization_id)
     upd_id = f"upd_{int(time.time())}"
     upd = LiveUpdate(
         id=upd_id,
-        organization_id=req.organization_id,
+        organization_id=org_id,
         property_id=req.property_id,
         title=req.title,
         content=req.content,
@@ -762,7 +1037,7 @@ async def create_live_update(req: LiveUpdateRequest, db: AsyncSession = Depends(
 
     await live_broadcaster.broadcast({
         "type": "LIVE_UPDATE_CHANGED",
-        "organization_id": req.organization_id,
+        "organization_id": org_id,
         "property_id": req.property_id,
         "title": req.title,
         "content": req.content,
@@ -782,8 +1057,9 @@ async def create_live_update(req: LiveUpdateRequest, db: AsyncSession = Depends(
     }
 
 @app.get("/api/v1/live-updates", tags=["Live Property Announcements"])
-async def list_live_updates(organization_id: str, property_id: str, db: AsyncSession = Depends(get_db)):
-    stmt = select(LiveUpdate).where(LiveUpdate.organization_id == organization_id, LiveUpdate.property_id == property_id, LiveUpdate.is_active == True)
+async def list_live_updates(organization_id: Optional[str] = None, property_id: str = "prop_azure_palm_resort", limit: int = 50, offset: int = 0, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    org_id = verify_tenant_access(current_user, organization_id)
+    stmt = select(LiveUpdate).where(LiveUpdate.organization_id == org_id, LiveUpdate.property_id == property_id, LiveUpdate.is_active == True).limit(limit).offset(offset)
     res = await db.execute(stmt)
     updates = res.scalars().all()
     return [
@@ -793,18 +1069,19 @@ async def list_live_updates(organization_id: str, property_id: str, db: AsyncSes
 
 # --- EXTERNAL LIVE INTEGRATION SOURCES ---
 @app.get("/api/v1/live-updates/integrations", tags=["Live Property Announcements"])
-async def list_integration_sources(organization_id: str, property_id: str, db: AsyncSession = Depends(get_db)):
+async def list_integration_sources(organization_id: Optional[str] = None, property_id: str = "prop_azure_palm_resort", limit: int = 50, offset: int = 0, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    org_id = verify_tenant_access(current_user, organization_id)
     stmt = select(IntegrationSource).where(
-        IntegrationSource.organization_id == organization_id,
+        IntegrationSource.organization_id == org_id,
         IntegrationSource.property_id == property_id
-    )
+    ).limit(limit).offset(offset)
     res = await db.execute(stmt)
     sources = res.scalars().all()
     if not sources:
         return [
             {
                 "id": "src_hostel_erp_01",
-                "organization_id": organization_id,
+                "organization_id": org_id,
                 "property_id": property_id,
                 "name": "Campus Hostel ERP System",
                 "source_type": "REST_API",
@@ -843,12 +1120,13 @@ async def list_integration_sources(organization_id: str, property_id: str, db: A
     ]
 
 @app.post("/api/v1/live-updates/integrations", tags=["Live Property Announcements"])
-async def create_integration_source(req: IntegrationSourceRequest, db: AsyncSession = Depends(get_db)):
+async def create_integration_source(req: IntegrationSourceRequest, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    org_id = verify_tenant_access(current_user, req.organization_id)
     src_id = f"src_{int(time.time())}"
     masked = f"••••••••{req.credentials[-4:]}" if req.credentials and len(req.credentials) > 4 else "••••••••key_secret"
     src = IntegrationSource(
         id=src_id,
-        organization_id=req.organization_id,
+        organization_id=org_id,
         property_id=req.property_id,
         name=req.name,
         source_type=req.source_type,
@@ -878,7 +1156,7 @@ async def create_integration_source(req: IntegrationSourceRequest, db: AsyncSess
     }
 
 @app.post("/api/v1/live-updates/integrations/{source_id}/test", tags=["Live Property Announcements"])
-async def test_integration_source(source_id: str):
+async def test_integration_source(source_id: str, current_user: User = Depends(get_current_user)):
     return {
         "source_id": source_id,
         "status": "CONNECTED",
@@ -889,15 +1167,16 @@ async def test_integration_source(source_id: str):
     }
 
 @app.post("/api/v1/live-updates/integrations/{source_id}/sync", tags=["Live Property Announcements"])
-async def sync_integration_source(source_id: str, db: AsyncSession = Depends(get_db)):
+async def sync_integration_source(source_id: str, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     stmt = select(IntegrationSource).where(IntegrationSource.id == source_id)
     res = await db.execute(stmt)
     src = res.scalar_one_or_none()
-    now_str = str(datetime.now(timezone.utc))
     if src:
+        verify_tenant_access(current_user, src.organization_id)
         src.last_synced_at = datetime.now(timezone.utc)
         src.status = "CONNECTED"
         await db.flush()
+    now_str = str(datetime.now(timezone.utc))
     return {
         "source_id": source_id,
         "status": "CONNECTED",
@@ -907,11 +1186,12 @@ async def sync_integration_source(source_id: str, db: AsyncSession = Depends(get
     }
 
 @app.post("/api/v1/live-updates/integrations/{source_id}/mappings", tags=["Live Property Announcements"])
-async def save_integration_mappings(source_id: str, req: IntegrationMappingRequest, db: AsyncSession = Depends(get_db)):
+async def save_integration_mappings(source_id: str, req: IntegrationMappingRequest, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     stmt = select(IntegrationSource).where(IntegrationSource.id == source_id)
     res = await db.execute(stmt)
     src = res.scalar_one_or_none()
     if src:
+        verify_tenant_access(current_user, src.organization_id)
         src.field_mappings = req.field_mappings
         await db.flush()
         return {
@@ -940,9 +1220,10 @@ DEFAULT_POLICY_LIST = [
 ]
 
 @app.get("/api/v1/live-updates/integrations/{source_id}/data-access", tags=["ERP Data Access Control"])
-async def get_integration_data_access(source_id: str, organization_id: str, property_id: str, db: AsyncSession = Depends(get_db)):
+async def get_integration_data_access(source_id: str, organization_id: Optional[str] = None, property_id: str = "prop_azure_palm_resort", current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    org_id = verify_tenant_access(current_user, organization_id)
     stmt = select(DataAccessPolicy).where(
-        DataAccessPolicy.organization_id == organization_id,
+        DataAccessPolicy.organization_id == org_id,
         DataAccessPolicy.property_id == property_id
     )
     res = await db.execute(stmt)
@@ -970,7 +1251,7 @@ async def get_integration_data_access(source_id: str, organization_id: str, prop
 
     return {
         "source_id": source_id,
-        "organization_id": organization_id,
+        "organization_id": org_id,
         "property_id": property_id,
         "enabled_categories_count": enabled_count,
         "restricted_categories_count": restricted_count,
@@ -978,14 +1259,15 @@ async def get_integration_data_access(source_id: str, organization_id: str, prop
     }
 
 @app.post("/api/v1/live-updates/integrations/{source_id}/data-access", tags=["ERP Data Access Control"])
-async def update_integration_data_access(source_id: str, req: DataAccessPolicyUpdateRequest, db: AsyncSession = Depends(get_db)):
+async def update_integration_data_access(source_id: str, req: DataAccessPolicyUpdateRequest, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    org_id = verify_tenant_access(current_user, req.organization_id)
     changes_list = []
-    actor = req.updated_by or "Hostel Admin"
+    actor = req.updated_by or current_user.full_name or "Hostel Admin"
     now_dt = datetime.now(timezone.utc)
 
     for cat in req.categories:
         stmt = select(DataAccessPolicy).where(
-            DataAccessPolicy.organization_id == req.organization_id,
+            DataAccessPolicy.organization_id == org_id,
             DataAccessPolicy.category_key == cat.category_key
         )
         res = await db.execute(stmt)
@@ -997,7 +1279,7 @@ async def update_integration_data_access(source_id: str, req: DataAccessPolicyUp
         if not pol:
             pol = DataAccessPolicy(
                 id=f"pol_{cat.category_key}_{int(time.time())}",
-                organization_id=req.organization_id,
+                organization_id=org_id,
                 property_id=req.property_id,
                 integration_source_id=source_id,
                 category_key=cat.category_key,
@@ -1032,7 +1314,7 @@ async def update_integration_data_access(source_id: str, req: DataAccessPolicyUp
 
     audit = AuditLog(
         id=f"audit_access_{int(time.time()*1000)}",
-        organization_id=req.organization_id,
+        organization_id=org_id,
         user_id=actor,
         action="UPDATE_DATA_ACCESS_POLICY",
         target_type="ERP_INTEGRATION_ACCESS",
@@ -1058,11 +1340,12 @@ async def update_integration_data_access(source_id: str, req: DataAccessPolicyUp
     }
 
 @app.get("/api/v1/live-updates/integrations/{source_id}/audit-logs", tags=["ERP Data Access Control"])
-async def get_integration_access_audit_logs(source_id: str, organization_id: str, db: AsyncSession = Depends(get_db)):
+async def get_integration_access_audit_logs(source_id: str, organization_id: Optional[str] = None, limit: int = 50, offset: int = 0, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    org_id = verify_tenant_access(current_user, organization_id)
     stmt = select(AuditLog).where(
-        AuditLog.organization_id == organization_id,
+        AuditLog.organization_id == org_id,
         AuditLog.target_type == "ERP_INTEGRATION_ACCESS"
-    ).order_by(AuditLog.created_at.desc())
+    ).order_by(AuditLog.created_at.desc()).limit(limit).offset(offset)
     res = await db.execute(stmt)
     logs = res.scalars().all()
 
@@ -1095,10 +1378,10 @@ async def get_integration_access_audit_logs(source_id: str, organization_id: str
         for l in logs
     ]
 
-
 @app.delete("/api/v1/live-updates/integrations/{source_id}", tags=["Live Property Announcements"])
-async def delete_integration_source(source_id: str, organization_id: str = "org_azure_group", db: AsyncSession = Depends(get_db)):
-    stmt = select(IntegrationSource).where(IntegrationSource.id == source_id, IntegrationSource.organization_id == organization_id)
+async def delete_integration_source(source_id: str, organization_id: Optional[str] = None, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    org_id = verify_tenant_access(current_user, organization_id)
+    stmt = select(IntegrationSource).where(IntegrationSource.id == source_id, IntegrationSource.organization_id == org_id)
     res = await db.execute(stmt)
     src = res.scalar_one_or_none()
     if src:
@@ -1107,17 +1390,37 @@ async def delete_integration_source(source_id: str, organization_id: str = "org_
     return { "source_id": source_id, "deleted": True, "message": "Integration source disconnected." }
 
 # --- USAGE, BILLING & ANALYTICS ---
+@app.get("/api/v1/billing/subscription", tags=["SaaS Billing & Usage"])
+async def get_subscription_status(organization_id: Optional[str] = None, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    org_id = verify_tenant_access(current_user, organization_id)
+    sub = await metering_service.get_or_create_subscription_async(org_id, db=db)
+    summary = await metering_service.get_organization_usage_summary_async(org_id, db=db)
+    return {
+        "subscription": sub,
+        "usage_summary": summary
+    }
+
+@app.post("/api/v1/billing/subscription/upgrade", tags=["SaaS Billing & Usage"])
+async def upgrade_subscription_plan(req: PlanUpgradeRequest, organization_id: Optional[str] = None, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    org_id = verify_tenant_access(current_user, organization_id)
+    try:
+        return await metering_service.update_subscription_plan_async(org_id, req.plan_name, db=db)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
 @app.get("/api/v1/usage", tags=["SaaS Billing & Usage"])
-async def get_usage(organization_id: str):
-    return metering_service.get_organization_usage_summary(organization_id)
+async def get_usage(organization_id: Optional[str] = None, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    org_id = verify_tenant_access(current_user, organization_id)
+    return await metering_service.get_organization_usage_summary_async(org_id, db=db)
 
 @app.get("/api/v1/analytics", tags=["Platform & Agent Analytics"])
-async def get_analytics(organization_id: str, db: AsyncSession = Depends(get_db)):
-    convs_count = (await db.execute(select(func.count(Conversation.id)).where(Conversation.organization_id == organization_id))).scalar() or 0
-    events_count = (await db.execute(select(func.count(UsageEvent.id)).where(UsageEvent.organization_id == organization_id))).scalar() or 0
+async def get_analytics(organization_id: Optional[str] = None, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    org_id = verify_tenant_access(current_user, organization_id)
+    convs_count = (await db.execute(select(func.count(Conversation.id)).where(Conversation.organization_id == org_id))).scalar() or 0
+    events_count = (await db.execute(select(func.count(UsageEvent.id)).where(UsageEvent.organization_id == org_id))).scalar() or 0
     
     return {
-        "organization_id": organization_id,
+        "organization_id": org_id,
         "total_conversations": convs_count,
         "total_usage_events": events_count,
         "ai_resolution_rate": "94.5%",
@@ -1129,7 +1432,7 @@ async def get_analytics(organization_id: str, db: AsyncSession = Depends(get_db)
 
 # --- SUPER ADMIN PLATFORM REAL-TIME TELEMETRY ENDPOINTS ---
 @app.get("/api/v1/platform/events", tags=["Platform Super Admin Telemetry"])
-async def platform_realtime_events_stream():
+async def platform_realtime_events_stream(current_user: User = Depends(get_super_admin_user)):
     """Server-Sent Events (SSE) stream for Super Admin real-time platform telemetry."""
     async def event_generator():
         q = await live_broadcaster.subscribe()
@@ -1154,7 +1457,7 @@ async def platform_realtime_events_stream():
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 @app.get("/api/v1/platform/telemetry", tags=["Platform Super Admin Telemetry"])
-async def get_platform_telemetry(db: AsyncSession = Depends(get_db)):
+async def get_platform_telemetry(current_user: User = Depends(get_super_admin_user), db: AsyncSession = Depends(get_db)):
     """Fetch aggregated platform telemetry for Super Admin control plane."""
     orgs_count = 1
     agents_count = 1
@@ -1207,4 +1510,5 @@ async def get_platform_telemetry(db: AsyncSession = Depends(get_db)):
             }
         ]
     }
+
 

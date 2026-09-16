@@ -60,6 +60,140 @@ class HospitalityToolRegistry:
         self.db_session = db_session
         self.rag_pipeline = rag_pipeline
 
+    @staticmethod
+    def get_tool_schemas() -> List[Dict[str, Any]]:
+        """Returns JSON schema function definitions for OpenAI / LiteLLM function calling."""
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "check_room_availability",
+                    "description": "Check available rooms, rates, and vacancies for check-in and check-out dates.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "check_in": {"type": "string", "description": "Check-in date (YYYY-MM-DD)"},
+                            "check_out": {"type": "string", "description": "Check-out date (YYYY-MM-DD)"},
+                            "query": {"type": "string", "description": "Optional search inquiry"}
+                        },
+                        "required": []
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_facility_status",
+                    "description": "Check operating hours and status of property facilities (pool, spa, gym, laundry).",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "facility_name": {"type": "string", "description": "Name of the facility"}
+                        },
+                        "required": ["facility_name"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "create_booking",
+                    "description": "Create a room reservation or booking for a guest.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "customer_name": {"type": "string", "description": "Full name of the guest"},
+                            "check_in": {"type": "string", "description": "Check-in date"},
+                            "check_out": {"type": "string", "description": "Check-out date"},
+                            "room_type": {"type": "string", "description": "Desired room type"}
+                        },
+                        "required": ["customer_name", "check_in", "check_out"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_today_activities",
+                    "description": "Get today's resort/hostel activities and entertainment schedule.",
+                    "parameters": {"type": "object", "properties": {}}
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_restaurant_status",
+                    "description": "Get dining options, restaurants, cuisines, and operating hours.",
+                    "parameters": {"type": "object", "properties": {}}
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_current_property_updates",
+                    "description": "Get live property announcements, notices, and updates.",
+                    "parameters": {"type": "object", "properties": {}}
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "handoff_to_human",
+                    "description": "Escalate conversation to human staff / receptionist / concierge.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "reason": {"type": "string", "description": "Reason for handoff"}
+                        },
+                        "required": ["reason"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_resident_info",
+                    "description": "Fetch resident details, room number, fee status, and hostel info.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "resident_id": {"type": "string", "description": "ID of the resident"}
+                        }
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "create_maintenance_request",
+                    "description": "Create a maintenance request or support ticket for room repairs.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "category": {"type": "string", "description": "Issue category"},
+                            "description": {"type": "string", "description": "Detailed description"},
+                            "room_number": {"type": "string", "description": "Room number"}
+                        },
+                        "required": ["description"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "search_knowledge",
+                    "description": "Search the property RAG knowledge base for rules, policies, guides, or FAQs.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "Knowledge search query"}
+                        },
+                        "required": ["query"]
+                    }
+                }
+            }
+        ]
+
     @asynccontextmanager
     async def _session_scope(self):
         if self.db_session:

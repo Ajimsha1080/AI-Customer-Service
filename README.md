@@ -41,19 +41,28 @@ The application features a hand-crafted **Clean White YC Light Mode System** (St
 
 ---
 
-## 🤖 Real AI & Indic Language Integration (Sarvam AI)
+## 🔒 Production Security & Multi-Tenant Authorization
 
-- **LLM Gateway**: Integrated with **Sarvam AI (`sarvam-2b`)** and LiteLLM (`gpt-4o-mini`, `claude-3-5-sonnet`, `gemini-1.5-flash`).
-- **Indic Voice (STT & TTS)**: Native support for Indian regional languages (**Malayalam**, **Hindi**, **Tamil**, **Telugu**, **Kannada**).
-- **Sarvam Key Config**: Configured in `.env` under `SARVAM_API_KEY`.
+- **Authentication**: Argon2id password hashing and short-lived JWT access & refresh tokens (`/api/v1/auth/login`, `/api/v1/auth/refresh`, `/api/v1/auth/me`).
+- **Tenant Isolation**: Server-side tenant scoping (`verify_tenant_access`) enforcing strict org-level boundary authorization across all control & data plane endpoints.
+- **Billing Quotas**: SaaS subscription tier enforcement (`FREE`, `STARTER`, `PROFESSIONAL`, `BUSINESS`, `ENTERPRISE`) returning `HTTP 402 Payment Required` when limits are exceeded.
 
 ---
 
-## ⚡ Real-Time Data Persistence & 21 REST APIs
+## 🤖 Real AI, Vector Store & Execution Engine
 
-- **Real-Time DB Transactions**: Uses SQLAlchemy 2.0 `AsyncSession` with SQLite (`dev_hospitality.db`) or PostgreSQL.
-- **Live Tool Execution**: Guest inquiries dynamically query active database tables (`Room`, `Facility`, `LiveUpdate`, `Reservation`).
-- **OpenAPI REST Docs**: Live interactive API documentation for 21 endpoints at [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
+- **LiteLLM Tool-Calling Loop**: Multi-turn function execution (`_execute_litellm_tool_loop`) with schema filtering and message history.
+- **RAG Vector Persistence**: Dense embeddings (`SentenceTransformers` `all-MiniLM-L6-v2`) and PostgreSQL `pgvector` store (`PostgresPgVectorStore`).
+- **LLM Moderation Guardrails**: Fast heuristic injection detection + LLM moderation classifier (`check_guardrails`).
+- **Hard Execution Timeouts**: 15s execution timeout with graceful fallback to RAG synthesis.
+- **Indic Voice (STT & TTS)**: Native support for Indian regional languages (**Malayalam**, **Hindi**, **Tamil**, **Telugu**, **Kannada**).
+
+---
+
+## ⚡ Real-Time Observability & REST APIs
+
+- **Observability**: `X-Request-ID` correlation tracing, structured JSON logging, and production health probes (`/health`, `/ready`, `/metrics`).
+- **OpenAPI REST Docs**: Live interactive API documentation for 25+ REST endpoints at [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
 
 ---
 
@@ -94,13 +103,13 @@ npm run dev -- -p 3001
 
 ## 🧪 Running Automated Tests
 
-Run the pytest suite to verify tenant data isolation, prompt injection guardrails, agent lifecycle transitions, RAG vector purging, reservation transactional consistency, ERP data access policies, embeddable widget serving, and usage metering:
+Run the full pytest suite to verify Argon2 password security, JWT token issuance & revocation, multi-tenant IDOR isolation, PGVector dense embeddings, LiteLLM function calling tool loops, moderation guardrails, hard timeouts, subscription tier HTTP 402 quota enforcement, DB usage metering, request ID header tracing, error envelopes, and health probes:
 
 ```bash
 python -m pytest tests/
 ```
 
-**Result**: `17 passed in 2.19s` (**100% Pass Rate** across 9 test modules).
+**Result**: `41 passed in 63.39s` (**100% Pass Rate** across 15 test modules).
 
 ---
 
