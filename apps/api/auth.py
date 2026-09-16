@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.api.config import settings
 from services.database.session import get_db
-from services.database.models import User, UserRole
+from services.database.models import User, UserRole, RevokedToken
 
 pwd_context = CryptContext(schemes=["argon2"], deprecated="auto")
 security_scheme = HTTPBearer(auto_error=False)
@@ -70,6 +70,35 @@ def decode_access_token(token: str) -> dict:
         )
 
 REFRESH_TOKEN_DENYLIST = set()
+
+async def revoke_refresh_token(token: str, db: Optional[AsyncSession] = None):
+    """Revokes a refresh token in memory and persists it to database."""
+    REFRESH_TOKEN_DENYLIST.add(token)
+    if db:
+        stmt = select(RevokedToken).where(RevokedToken.token == token)
+        res = await db.execute(stmt)
+        if not res.scalar_one_or_none():
+            rev = RevokedToken(token=token)
+            db.add(rev)
+            await db.flush()
+
+async def decode_refresh_token_async(token: str, db: Optional[AsyncSession] = None) -> dict:
+    """Decodes and validates a JWT refresh token with persistent DB revocation check."""
+    if token in REFRESH_TOKEN_DENYLIST:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has been revoked/logged out."
+        )
+    if db:
+        stmt = select(RevokedToken).where(RevokedToken.token == token)
+        res = await db.execute(stmt)
+        if res.scalar_one_or_none():
+            REFRESH_TOKEN_DENYLIST.add(token)
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token has been revoked/logged out."
+            )
+    return decode_refresh_token(token)
 
 def decode_refresh_token(token: str) -> dict:
     """Decodes and validates a JWT refresh token."""

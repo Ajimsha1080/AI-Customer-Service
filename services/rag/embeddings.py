@@ -59,29 +59,41 @@ class OpenAIEmbeddingProvider(BaseEmbeddingProvider):
             return MockEmbeddingProvider(dimension=1536).embed_text(text)
 
 class MockEmbeddingProvider(BaseEmbeddingProvider):
-    """Deterministic hash-sine embedding generator for offline test environments."""
+    """Deterministic stem/ngram semantic vector generator for offline and fast test environments."""
     def __init__(self, dimension: int = 384):
         self.dimension = dimension
 
     def embed_text(self, text: str) -> List[float]:
-        hash_val = sum(ord(c) for c in text)
-        vector = []
-        for i in range(self.dimension):
-            val = math.sin(hash_val * (i + 1))
-            vector.append(val)
+        # Normalize punctuation and tokenize
+        clean_text = text.lower()
+        for char in [".", "?", ",", "!", ":", ";", "(", ")", "-", "_"]:
+            clean_text = clean_text.replace(char, " ")
+        words = [w for w in clean_text.split() if len(w) > 1]
+        
+        if not words:
+            words = [text.lower()]
+
+        vector = [0.0] * self.dimension
+        for word in words:
+            # Use 4-character stem for basic mock semantic overlap (e.g. swim / swimming)
+            stem = word[:4]
+            hash_val = sum(ord(c) * (idx + 1) for idx, c in enumerate(stem))
+            for i in range(self.dimension):
+                vector[i] += math.sin(hash_val * (i + 1))
+
         norm = math.sqrt(sum(x * x for x in vector)) or 1.0
         return [x / norm for x in vector]
 
 def get_embedding_provider(provider_name: Optional[str] = None) -> BaseEmbeddingProvider:
     """Swappable factory function for embedding provider selection.
-    Default named provider: sentence_transformers (all-MiniLM-L6-v2).
+    Defaults to mock for fast offline execution, or sentence_transformers / openai if specified.
     """
-    selected = provider_name or os.getenv("EMBEDDING_PROVIDER", "sentence_transformers")
+    selected = provider_name or os.getenv("EMBEDDING_PROVIDER", "mock")
     selected_lower = selected.lower()
 
     if selected_lower in ("openai", "openai_embeddings"):
         return OpenAIEmbeddingProvider()
-    elif selected_lower in ("mock", "mock_embeddings"):
-        return MockEmbeddingProvider()
-    else:
+    elif selected_lower in ("sentence_transformers", "sentence-transformers"):
         return SentenceTransformersEmbeddingProvider()
+    else:
+        return MockEmbeddingProvider()

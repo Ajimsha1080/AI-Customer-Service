@@ -86,8 +86,9 @@ async def test_alembic_upgrade_head_on_empty_db():
         env = os.environ.copy()
         env["DATABASE_URL"] = f"sqlite+aiosqlite:///{test_db_path}"
 
+        import sys
         result = subprocess.run(
-            ["alembic", "upgrade", "head"],
+            [sys.executable, "-m", "alembic", "upgrade", "head"],
             cwd=os.getcwd(),
             env=env,
             capture_output=True,

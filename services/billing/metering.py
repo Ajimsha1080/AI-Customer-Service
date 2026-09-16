@@ -231,6 +231,8 @@ class UsageMeteringService:
                     session.add(sub_obj)
                     if is_local:
                         await session.commit()
+                    else:
+                        await session.flush()
                 
                 sub_dict = {
                     "id": sub_obj.id,
@@ -290,7 +292,7 @@ class UsageMeteringService:
                 if current_usage >= max_allowed:
                     return False, f"Monthly agent turn limit reached ({current_usage}/{max_allowed} turns) for plan '{plan_name}'", {"current": current_usage, "limit": max_allowed, "plan": plan_name}
 
-            elif resource == "agent_creation":
+            elif resource in ["agent_creation", "create_agent"]:
                 max_allowed = sub.get("max_agents", limits["max_agents"])
                 if session:
                     stmt = select(func.count(Agent.id)).where(Agent.organization_id == organization_id)
@@ -302,7 +304,7 @@ class UsageMeteringService:
                 if current_usage >= max_allowed:
                     return False, f"Agent creation limit reached ({current_usage}/{max_allowed} agents) for plan '{plan_name}'", {"current": current_usage, "limit": max_allowed, "plan": plan_name}
 
-            elif resource == "document_upload":
+            elif resource in ["document_upload", "upload_document"]:
                 max_allowed = limits.get("max_documents", 10)
                 if session:
                     stmt = select(func.count(Document.id)).where(Document.organization_id == organization_id)
@@ -387,3 +389,6 @@ class UsageMeteringService:
             "max_documents": limits.get("max_documents", 10),
             "message": f"Subscription plan successfully updated to {clean_plan}."
         }
+
+SaaSMeteringService = UsageMeteringService
+

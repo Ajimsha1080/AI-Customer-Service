@@ -237,16 +237,21 @@ class AgentRuntimeEngine:
         self,
         agent_config: Dict[str, Any],
         user_message: str,
-        conversation_history: List[Dict[str, str]],
-        organization_id: str,
-        property_id: str,
-        agent_id: str,
+        conversation_history: Optional[List[Dict[str, str]]] = None,
+        organization_id: str = "",
+        property_id: str = "",
+        agent_id: str = "",
         channel: str = "web_widget",
         language: str = "English",
-        user_context: Optional[Dict[str, Any]] = None
+        user_language: Optional[str] = None,
+        user_context: Optional[Dict[str, Any]] = None,
+        conversation_id: Optional[str] = None,
+        **kwargs: Any
     ) -> Dict[str, Any]:
         """Executes a single multi-tenant agent turn with LiteLLM tool calling, LLM moderation guardrails, and timeouts."""
         user_context = user_context or {"user_role": "resident", "resident_id": "res_default_1"}
+        conversation_history = conversation_history or []
+        language = user_language or language
         start_time = time.time()
         model_name = agent_config.get("model_name", settings.DEFAULT_LLM_MODEL)
         system_prompt = agent_config.get("system_prompt", "You are a professional AI Concierge.")

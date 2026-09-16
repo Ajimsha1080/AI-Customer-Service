@@ -156,6 +156,9 @@ class Document(Base):
     agent = relationship("Agent", back_populates="documents")
     chunks = relationship("DocumentChunk", back_populates="document", cascade="all, delete-orphan")
 
+KnowledgeDocument = Document
+
+
 class DocumentChunk(Base):
     __tablename__ = "document_chunks"
 
@@ -380,3 +383,11 @@ class AuditLog(Base):
     target_id: Mapped[str] = mapped_column(String(36), nullable=False)
     details_json: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=get_utc_now)
+
+class RevokedToken(Base):
+    __tablename__ = "revoked_tokens"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
+    token: Mapped[str] = mapped_column(Text, unique=True, nullable=False, index=True)
+    revoked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=get_utc_now)
+
