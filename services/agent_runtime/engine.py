@@ -164,15 +164,7 @@ class AgentRuntimeEngine:
                 messages.append({"role": h["role"], "content": h["content"]})
         messages.append({"role": "user", "content": user_message})
 
-        if "/" in model_name:
-            target_model = model_name
-        elif "claude" in model_name.lower():
-            target_model = f"anthropic/{model_name}"
-        elif "gemini" in model_name.lower():
-            target_model = f"gemini/{model_name}"
-        else:
-            target_model = f"openai/{model_name}"
-
+        target_model = model_name if "/" in model_name or "gpt" in model_name or "claude" in model_name else f"openai/{model_name}"
         agent_status = "AI_ACTIVE"
         final_text = None
 
@@ -182,12 +174,6 @@ class AgentRuntimeEngine:
                 "messages": messages,
                 "temperature": 0.2
             }
-            if "anthropic/" in target_model and anthropic_key and not anthropic_key.startswith("mock"):
-                kwargs["api_key"] = anthropic_key
-            elif "openai/" in target_model and openai_key and not openai_key.startswith("mock"):
-                kwargs["api_key"] = openai_key
-            elif "gemini/" in target_model and google_key and not google_key.startswith("mock"):
-                kwargs["api_key"] = google_key
             if tool_schemas:
                 kwargs["tools"] = tool_schemas
                 kwargs["tool_choice"] = "auto"
