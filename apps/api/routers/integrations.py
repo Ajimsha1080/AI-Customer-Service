@@ -63,6 +63,18 @@ async def upload_knowledge_document(req: KnowledgeDocumentRequest, current_user:
     if not allowed:
         raise HTTPException(status_code=status.HTTP_402_PAYMENT_REQUIRED, detail=f"Billing quota exceeded: {reason}")
 
+    # Upload Safety Validation
+    allowed_types = {"txt", "pdf", "json", "md", "csv", "doc", "docx"}
+    if req.document_type.lower() not in allowed_types:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unsupported document type '{req.document_type}'. Allowed types: {sorted(list(allowed_types))}")
+
+    if len(req.content) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Document content exceeds maximum allowed size limit of 10MB.")
+
+    injection_keywords = ["ignore all previous instructions", "ignore previous instructions", "you are now an unfiltered", "jailbreak", "override system prompt"]
+    if any(kw in req.content.lower() for kw in injection_keywords):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Document upload rejected: Potential prompt injection payload detected.")
+
     doc_id = f"doc_{int(time.time()*1000)}"
     doc = KnowledgeDocument(
         id=doc_id,
