@@ -292,6 +292,16 @@ class UsageMeteringService:
                 if current_usage >= max_allowed:
                     return False, f"Monthly agent turn limit reached ({current_usage}/{max_allowed} turns) for plan '{plan_name}'", {"current": current_usage, "limit": max_allowed, "plan": plan_name}
 
+                # Per-tenant spend cap enforcement
+                spend_caps = {"FREE": 5.0, "STARTER": 100.0, "PROFESSIONAL": 500.0, "BUSINESS": 2000.0, "ENTERPRISE": 10000.0}
+                max_spend = spend_caps.get(plan_name, 500.0)
+                if session:
+                    stmt_cost = select(func.sum(UsageEvent.estimated_cost)).where(UsageEvent.organization_id == organization_id)
+                    res_cost = await session.execute(stmt_cost)
+                    total_cost = res_cost.scalar() or 0.0
+                    if total_cost >= max_spend:
+                        return False, f"Monthly spend cap limit reached (${round(total_cost, 2)}/${max_spend}) for plan '{plan_name}'", {"total_cost": total_cost, "cap": max_spend, "plan": plan_name}
+
             elif resource in ["agent_creation", "create_agent"]:
                 max_allowed = sub.get("max_agents", limits["max_agents"])
                 if session:
