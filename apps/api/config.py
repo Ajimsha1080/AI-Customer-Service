@@ -43,6 +43,12 @@ class Settings(BaseSettings):
     GOOGLE_CLIENT_SECRET: Optional[str] = None
 
     STORAGE_PROVIDER: str = "local"
+    AWS_S3_BUCKET: str = "hospitality-agent-rag-documents"
+    AWS_ACCESS_KEY_ID: Optional[str] = None
+    AWS_SECRET_ACCESS_KEY: Optional[str] = None
+    AWS_REGION: str = "us-east-1"
+
+    SENTRY_DSN: Optional[str] = None
 
     LANGSMITH_TRACING: str = "false"
     LANGSMITH_API_KEY: Optional[str] = "mock-langsmith-key"

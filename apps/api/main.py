@@ -26,6 +26,19 @@ limiter = Limiter(key_func=get_remote_address, default_limits=["100/minute"])
 logging.basicConfig(level=logging.INFO if not settings.DEBUG else logging.DEBUG)
 logger = logging.getLogger("hospitality_agent_cloud")
 
+# Configure Sentry Error Tracking
+if settings.SENTRY_DSN:
+    try:
+        import sentry_sdk
+        from sentry_sdk.integrations.fastapi import FastApiIntegration
+        sentry_sdk.init(
+            dsn=settings.SENTRY_DSN,
+            traces_sample_rate=1.0,
+            integrations=[FastApiIntegration()]
+        )
+    except Exception as e:
+        logging.warning(f"Failed to initialize Sentry SDK: {e}")
+
 app = FastAPI(
     title=settings.PROJECT_NAME,
     version=settings.VERSION,

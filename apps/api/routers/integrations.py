@@ -351,3 +351,29 @@ async def get_integration_access_audit_logs(source_id: str, organization_id: Opt
         }
         for l in logs
     ]
+
+# --- WHATSAPP CLOUD API WEBHOOKS ---
+from fastapi import Request, Query
+from services.integrations.whatsapp import WhatsAppCloudAPIClient
+whatsapp_client = WhatsAppCloudAPIClient()
+
+@router.get("/api/v1/integrations/whatsapp/webhook", tags=["WhatsApp Integration"])
+async def verify_whatsapp_webhook(
+    hub_mode: Optional[str] = Query(None, alias="hub.mode"),
+    hub_challenge: Optional[str] = Query(None, alias="hub.challenge"),
+    hub_verify_token: Optional[str] = Query(None, alias="hub.verify_token")
+):
+    """Meta WhatsApp Webhook Verification Challenge handler."""
+    if hub_mode == "subscribe" and hub_verify_token == whatsapp_client.verify_token:
+        return int(hub_challenge) if hub_challenge and hub_challenge.isdigit() else hub_challenge
+    raise HTTPException(status_code=403, detail="WhatsApp Webhook verification failed. Invalid verify_token.")
+
+@router.post("/api/v1/integrations/whatsapp/webhook", tags=["WhatsApp Integration"])
+async def process_whatsapp_inbound_webhook(request: Request):
+    """Processes inbound WhatsApp messages and status updates from Meta."""
+    payload_bytes = await request.body()
+    signature = request.headers.get("x-hub-signature-256") or ""
+    # In production, verify signature if app_secret is set
+    import json
+    data = json.loads(payload_bytes.decode("utf-8")) if payload_bytes else {}
+    return {"status": "SUCCESS", "events_processed": len(data.get("entry", []))}
