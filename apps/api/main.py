@@ -19,7 +19,6 @@ from services.billing.metering import SaaSMeteringService
 
 metering_service = SaaSMeteringService()
 
-
 # Configure Limiter
 limiter = Limiter(key_func=get_remote_address, default_limits=["100/minute"])
 
@@ -133,24 +132,30 @@ async def init_db_and_seed():
         await conn.run_sync(Base.metadata.create_all)
 
     async with AsyncSessionLocal() as db:
-        res = await db.execute(select(User).where(User.email == "admin@azurehostel.com"))
-        if not res.scalar_one_or_none():
-            res_org = await db.execute(select(Organization).where(Organization.id == "org_azure_group"))
-            org = res_org.scalar_one_or_none()
-            if not org:
-                org = Organization(id="org_azure_group", name="Azure Palm Hostel", slug="azure-palm-hostel")
-                db.add(org)
-                await db.flush()
-            user = User(
-                id="usr_admin_01",
-                organization_id=org.id,
-                email="admin@azurehostel.com",
-                hashed_password=hash_password("admin123"),
-                full_name="Hostel Admin",
-                role=UserRole.ORGANIZATION_ADMIN,
-                is_active=True
-            )
-            db.add(user)
-            await db.commit()
+        res_org = await db.execute(select(Organization).where(Organization.id == "org_azure_group"))
+        org = res_org.scalar_one_or_none()
+        if not org:
+            org = Organization(id="org_azure_group", name="Azure Palm Hostel", slug="azure-palm-hostel")
+            db.add(org)
+            await db.flush()
 
+        users_to_seed = [
+            ("usr_admin_01", "admin@azurehostel.com", UserRole.ORGANIZATION_ADMIN, "admin123"),
+            ("usr_demo123", "demo@azurehostel.com", UserRole.ORGANIZATION_ADMIN, "admin123"),
+            ("usr_superadmin", "superadmin@azurehostel.com", UserRole.SUPER_ADMIN, "superadmin123"),
+        ]
 
+        for u_id, email, role, pwd in users_to_seed:
+            res_u = await db.execute(select(User).where(User.id == u_id))
+            if not res_u.scalar_one_or_none():
+                u_obj = User(
+                    id=u_id,
+                    organization_id=org.id,
+                    email=email,
+                    hashed_password=hash_password(pwd),
+                    full_name=email.split("@")[0].title(),
+                    role=role,
+                    is_active=True
+                )
+                db.add(u_obj)
+        await db.commit()

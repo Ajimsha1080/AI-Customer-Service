@@ -1,0 +1,6 @@
+apiVersion: v2
+name: hospitality-agent
+description: Helm Chart for Multi-Tenant Hospitality Agent Cloud Production Stack
+type: application
+version: 1.0.0
+appVersion: "1.0.0"

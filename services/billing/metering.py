@@ -369,6 +369,7 @@ class UsageMeteringService:
                     sub_obj.max_properties = limits["max_properties"]
                     sub_obj.max_conversations_per_month = limits["max_conversations"]
 
+                await session.flush()
                 if is_local:
                     await session.commit()
                     await session.close()

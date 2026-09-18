@@ -32,6 +32,16 @@ class Settings(BaseSettings):
 
     WHATSAPP_API_KEY: Optional[str] = "mock-whatsapp-key"
     PAYMENT_PROVIDER_KEY: Optional[str] = "mock-stripe-key"
+    STRIPE_SECRET_KEY: Optional[str] = "sk_test_mock_stripe_key"
+    STRIPE_WEBHOOK_SECRET: Optional[str] = "whsec_mock_stripe_webhook_secret"
+    STRIPE_PRICE_STARTER: str = "price_starter_mock"
+    STRIPE_PRICE_PROFESSIONAL: str = "price_professional_mock"
+    STRIPE_PRICE_BUSINESS: str = "price_business_mock"
+    STRIPE_PRICE_ENTERPRISE: str = "price_enterprise_mock"
+
+    GOOGLE_CLIENT_ID: Optional[str] = None
+    GOOGLE_CLIENT_SECRET: Optional[str] = None
+
     STORAGE_PROVIDER: str = "local"
 
     LANGSMITH_TRACING: str = "false"

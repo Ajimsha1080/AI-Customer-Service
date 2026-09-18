@@ -368,6 +368,9 @@ class Subscription(Base):
     max_agents: Mapped[int] = mapped_column(Integer, default=10)
     max_properties: Mapped[int] = mapped_column(Integer, default=5)
     max_conversations_per_month: Mapped[int] = mapped_column(Integer, default=50000)
+    stripe_customer_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
+    stripe_subscription_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
+    subscription_status: Mapped[str] = mapped_column(String(50), default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=get_utc_now)
 
     organization = relationship("Organization", back_populates="subscriptions")

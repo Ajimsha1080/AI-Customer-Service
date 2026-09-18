@@ -225,15 +225,13 @@ async def agent_chat(agent_id: str, req: AgentChatRequest, db: AsyncSession = De
     agent_res = await db.execute(agent_stmt)
     agent = agent_res.scalar_one_or_none()
 
-    if agent:
-        effective_org_id = agent.organization_id
-        if req.organization_id and req.organization_id != agent.organization_id:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Mismatched organization_id. Agent '{agent_id}' belongs to tenant '{agent.organization_id}'."
-            )
-    else:
-        effective_org_id = req.organization_id
+    target_org_id = agent.organization_id if agent else "org_azure_group"
+    if req.organization_id and req.organization_id != target_org_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Mismatched organization_id. Agent '{agent_id}' belongs to tenant '{target_org_id}'."
+        )
+    effective_org_id = target_org_id
 
     allowed, reason, details = await metering_service.check_billing_quota(effective_org_id, resource="agent_turn", db=db)
     if not allowed:
