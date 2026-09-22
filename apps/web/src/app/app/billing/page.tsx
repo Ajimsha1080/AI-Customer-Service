@@ -1,6 +1,7 @@
 'use client';
 import React, { useState, useEffect } from 'react';
 import { CreditCard, CheckCircle2, DollarSign, Loader2 } from 'lucide-react';
+import { API_BASE } from '@/lib/api';
 
 export default function AppBillingPage() {
   const [loading, setLoading] = useState(true);
@@ -16,8 +17,6 @@ export default function AppBillingPage() {
     total_conversations: 1660,
     active_agents: 4
   });
-
-  const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
 
   useEffect(() => {
     async function fetchSubscriptionData() {

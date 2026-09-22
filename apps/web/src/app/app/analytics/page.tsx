@@ -2,6 +2,8 @@
 import React, { useState, useEffect } from 'react';
 import { BarChart3, TrendingUp, DollarSign, MessageSquare, ShieldCheck, UserCheck } from 'lucide-react';
 
+import { API_BASE } from '@/lib/api';
+
 export default function AppAnalyticsPage() {
   const [analytics, setAnalytics] = useState<any>({
     total_conversations: 0,
@@ -15,7 +17,7 @@ export default function AppAnalyticsPage() {
   useEffect(() => {
     async function loadAnalytics() {
       try {
-        const res = await fetch('http://localhost:8000/api/v1/analytics?organization_id=org_azure_group');
+        const res = await fetch(`${API_BASE}/api/v1/analytics?organization_id=org_azure_group`);
         if (res.ok) {
           const data = await res.json();
           setAnalytics(data);

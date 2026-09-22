@@ -1,6 +1,7 @@
 'use client';
 import React, { useState, useEffect } from 'react';
 import { Bot } from 'lucide-react';
+import { API_BASE } from '@/lib/api';
 
 export default function PlatformAgentsPage() {
   const [agents, setAgents] = useState<any[]>([]);
@@ -9,7 +10,7 @@ export default function PlatformAgentsPage() {
   useEffect(() => {
     async function loadGlobalAgents() {
       try {
-        const res = await fetch('http://localhost:8000/api/v1/agents?organization_id=org_azure_group');
+        const res = await fetch(`${API_BASE}/api/v1/agents?organization_id=org_azure_group`);
         if (res.ok) {
           const data = await res.json();
           setAgents(data);

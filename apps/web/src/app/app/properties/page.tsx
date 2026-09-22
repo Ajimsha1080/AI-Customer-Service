@@ -2,6 +2,7 @@
 import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { Building2, Plus, Bot, MapPin, CheckCircle2, ChevronRight, Sparkles } from 'lucide-react';
+import { API_BASE } from '@/lib/api';
 
 export default function AppPropertiesPage() {
   const [properties, setProperties] = useState<any[]>([]);
@@ -10,7 +11,7 @@ export default function AppPropertiesPage() {
   useEffect(() => {
     async function loadProperties() {
       try {
-        const res = await fetch('http://localhost:8000/api/v1/properties?organization_id=org_azure_group');
+        const res = await fetch(`${API_BASE}/api/v1/properties?organization_id=org_azure_group`);
         if (res.ok) {
           const data = await res.json();
           if (Array.isArray(data) && data.length > 0) {

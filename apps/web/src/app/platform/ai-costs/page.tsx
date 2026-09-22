@@ -1,6 +1,7 @@
 'use client';
 import React, { useState, useEffect } from 'react';
 import { Cpu, DollarSign, Zap } from 'lucide-react';
+import { API_BASE } from '@/lib/api';
 
 export default function PlatformAICostsPage() {
   const [metrics, setMetrics] = useState<any>({ total_conversations: 0, active_agents: 0 });
@@ -9,7 +10,7 @@ export default function PlatformAICostsPage() {
   useEffect(() => {
     async function loadMetrics() {
       try {
-        const res = await fetch('http://localhost:8000/metrics');
+        const res = await fetch(`${API_BASE}/metrics`);
         if (res.ok) {
           const data = await res.json();
           setMetrics(data);

@@ -1,7 +1,7 @@
 'use client';
 import React, { useState, useRef } from 'react';
-import Link from 'next/link';
-import { Send, Sparkles, Utensils, Calendar, ShieldCheck } from 'lucide-react';
+import { Volume2, Mic, MicOff, Globe, Sparkles, Send, Bot, CheckCircle2, User, PhoneCall, Radio, MessageSquare, AlertCircle } from 'lucide-react';
+import { API_BASE } from '@/lib/api';
 import { VoiceOrb } from '../../../components/ui/voice-orb';
 
 const WELCOME_GREETINGS: Record<string, string> = {
@@ -154,7 +154,7 @@ export default function ResidentHostelAssistantPage() {
   // Real-Time Server-Sent Events (SSE) Stream Listener for Resident Chat
   React.useEffect(() => {
     try {
-      const eventSource = new EventSource('http://localhost:8000/api/v1/live-updates/events?organization_id=org_azure_group&property_id=prop_azure_palm_resort');
+      const eventSource = new EventSource(`${API_BASE}/api/v1/live-updates/events?organization_id=org_azure_group&property_id=prop_azure_palm_resort`);
       eventSource.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
@@ -184,7 +184,7 @@ export default function ResidentHostelAssistantPage() {
   };
 
   const getApiEndpoint = () => {
-    return 'http://127.0.0.1:8000/api/v1/agents/agt_hostel_01/chat';
+    return `${API_BASE}/api/v1/agents/agt_hostel_01/chat`;
   };
 
   const sendVoiceMessage = async (queryText: string): Promise<string | null> => {
@@ -216,7 +216,7 @@ export default function ResidentHostelAssistantPage() {
     const activeLang = languageRef.current || language;
     setVoiceState('speaking');
     try {
-      const res = await fetch('http://127.0.0.1:8000/api/v1/voice/tts', {
+      const res = await fetch(`${API_BASE}/api/v1/voice/tts`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text, language: activeLang })

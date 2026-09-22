@@ -1,6 +1,7 @@
 'use client';
 import React, { useState, useEffect } from 'react';
 import { MessageSquare, User, Bot, CheckCircle2, AlertCircle, PhoneCall, Send, ShieldAlert, Tag, UserCheck } from 'lucide-react';
+import { API_BASE } from '@/lib/api';
 
 export default function AppConversationsInboxPage() {
   const [conversations, setConversations] = useState<any[]>([]);
@@ -17,7 +18,7 @@ export default function AppConversationsInboxPage() {
         { id: 'conv_03', guest: 'David Miller', agent_id: 'agt_booking_02', status: 'COMPLETED', time: '1 hour ago', room: 'Cottage 12', channel: 'web_widget' }
       ];
       try {
-        const res = await fetch('http://localhost:8000/api/v1/conversations?organization_id=org_azure_group');
+        const res = await fetch(`${API_BASE}/api/v1/conversations?organization_id=org_azure_group`);
         if (res.ok) {
           const data = await res.json();
           if (Array.isArray(data) && data.length > 0) {
@@ -44,7 +45,7 @@ export default function AppConversationsInboxPage() {
   const handleTakeover = async () => {
     if (!activeConv) return;
     try {
-      const res = await fetch(`http://localhost:8000/api/v1/conversations/${activeConv.id}/takeover`, {
+      const res = await fetch(`${API_BASE}/api/v1/conversations/${activeConv.id}/takeover`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ staff_user_id: 'usr_frontdesk_staff', reason: 'Staff Takeover' })

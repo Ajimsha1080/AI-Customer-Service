@@ -1,6 +1,7 @@
 'use client';
 import React, { useState, useEffect } from 'react';
 import { Building2, Plus, Search, Edit, Trash2 } from 'lucide-react';
+import { API_BASE } from '@/lib/api';
 
 export default function PlatformOrganizationsPage() {
   const [orgs, setOrgs] = useState<any[]>([]);
@@ -10,7 +11,7 @@ export default function PlatformOrganizationsPage() {
   useEffect(() => {
     async function loadOrgs() {
       try {
-        const res = await fetch('http://localhost:8000/api/v1/organizations');
+        const res = await fetch(`${API_BASE}/api/v1/organizations`);
         if (res.ok) {
           const data = await res.json();
           setOrgs(data);

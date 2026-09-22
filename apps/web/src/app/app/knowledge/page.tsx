@@ -2,6 +2,7 @@
 import React, { useState, useEffect } from 'react';
 import { Upload, FileText, Trash2, Search, BookOpen, HelpCircle, Shield, Info, Sparkles, ExternalLink, Plus, Eye, RefreshCw, X } from 'lucide-react';
 import Link from 'next/link';
+import { API_BASE } from '@/lib/api';
 
 export default function AppKnowledgeBasePage() {
   const [activeCategory, setActiveCategory] = useState<'documents' | 'faqs' | 'rules'>('documents');
@@ -17,6 +18,7 @@ export default function AppKnowledgeBasePage() {
   
   // Add Knowledge Modal state
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+
   const [addMode, setAddMode] = useState<'upload' | 'paste'>('upload');
   const [docTitle, setDocTitle] = useState('');
   const [docContent, setDocContent] = useState('');
@@ -24,8 +26,6 @@ export default function AppKnowledgeBasePage() {
 
   // View Document Modal state
   const [viewingDoc, setViewingDoc] = useState<any | null>(null);
-
-  const API_BASE = 'http://127.0.0.1:8000';
 
   const fetchDocuments = async () => {
     try {

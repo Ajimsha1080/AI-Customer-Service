@@ -47,8 +47,8 @@ export default function PlatformDashboardPage() {
     async function loadInitialData() {
       try {
         const [tRes, oRes] = await Promise.all([
-          fetch('http://localhost:8000/api/v1/platform/telemetry').then(r => r.ok ? r.json() : null),
-          fetch('http://localhost:8000/api/v1/organizations').then(r => r.ok ? r.json() : [])
+          fetch(`${API_BASE}/api/v1/platform/telemetry`).then(r => r.ok ? r.json() : null),
+          fetch(`${API_BASE}/api/v1/organizations`).then(r => r.ok ? r.json() : [])
         ]);
 
         if (tRes) {
@@ -76,7 +76,7 @@ export default function PlatformDashboardPage() {
   useEffect(() => {
     let es: EventSource | null = null;
     try {
-      es = new EventSource('http://localhost:8000/api/v1/platform/events');
+      es = new EventSource(`${API_BASE}/api/v1/platform/events`);
       
       es.onopen = () => {
         setIsLiveConnected(true);

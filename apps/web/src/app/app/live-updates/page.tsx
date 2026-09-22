@@ -5,6 +5,7 @@ import {
   Bell, Building2, Wrench, Database, Link as LinkIcon, RefreshCw, 
   ShieldCheck, AlertCircle, Edit3, Check, Sliders, ToggleLeft, ToggleRight
 } from 'lucide-react';
+import { API_BASE } from '@/lib/api';
 
 export default function AppLiveUpdatesPage() {
   const [activeTab, setActiveTab] = useState<'food' | 'notices' | 'facilities' | 'rooms' | 'integrations'>('food');
@@ -111,7 +112,7 @@ export default function AppLiveUpdatesPage() {
   // Real-Time Server-Sent Events (SSE) Stream Listener
   useEffect(() => {
     try {
-      const eventSource = new EventSource('http://localhost:8000/api/v1/live-updates/events?organization_id=org_azure_group&property_id=prop_azure_palm_resort');
+      const eventSource = new EventSource(`${API_BASE}/api/v1/live-updates/events?organization_id=org_azure_group&property_id=prop_azure_palm_resort`);
       eventSource.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
@@ -227,7 +228,7 @@ export default function AppLiveUpdatesPage() {
   const handleTestConnection = async (id: string) => {
     showToast('Testing ERP connection handshake...');
     try {
-      await fetch(`http://localhost:8000/api/v1/live-updates/integrations/${id}/test`, { method: 'POST' });
+      await fetch(`${API_BASE}/api/v1/live-updates/integrations/${id}/test`, { method: 'POST' });
       showToast('✓ Connection Verified! Hostel ERP endpoint reachable with 38ms latency.');
     } catch (e) {
       showToast('✓ Connection Verified! Hostel ERP endpoint reachable with 38ms latency.');
@@ -237,7 +238,7 @@ export default function AppLiveUpdatesPage() {
   const handleSyncNow = async (id: string) => {
     showToast('Syncing latest live operational data from Hostel ERP...');
     try {
-      await fetch(`http://localhost:8000/api/v1/live-updates/integrations/${id}/sync`, { method: 'POST' });
+      await fetch(`${API_BASE}/api/v1/live-updates/integrations/${id}/sync`, { method: 'POST' });
       setIntegrations(prev => prev.map(s => s.id === id ? { ...s, last_synced_at: 'Just now', status: 'CONNECTED' } : s));
       showToast('✓ Real-Time Sync Complete! Hostel AI Agent updated.');
     } catch (e) {

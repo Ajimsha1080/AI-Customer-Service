@@ -31,7 +31,7 @@ export default function OnboardingWizardPage() {
       setCurrentStep(prev => prev + 1);
     } else {
       try {
-        const propRes = await fetch('http://localhost:8000/api/v1/properties', {
+        const propRes = await fetch(`${API_BASE}/api/v1/properties`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -44,7 +44,7 @@ export default function OnboardingWizardPage() {
         const propData = await propRes.json();
         const propertyId = propData.id || 'prop_azure_palm_resort';
 
-        await fetch('http://localhost:8000/api/v1/agents', {
+        await fetch(`${API_BASE}/api/v1/agents`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({

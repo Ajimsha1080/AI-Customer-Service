@@ -1,6 +1,7 @@
 'use client';
 import React, { useState, useEffect } from 'react';
 import { Cpu, Zap, TrendingUp, DollarSign } from 'lucide-react';
+import { API_BASE } from '@/lib/api';
 
 export default function AppUsagePage() {
   const [usage, setUsage] = useState<any>({ total_tokens: 0, estimated_cost: 0 });
@@ -9,7 +10,7 @@ export default function AppUsagePage() {
   useEffect(() => {
     async function loadUsage() {
       try {
-        const res = await fetch('http://localhost:8000/api/v1/usage?organization_id=org_azure_group');
+        const res = await fetch(`${API_BASE}/api/v1/usage?organization_id=org_azure_group`);
         if (res.ok) {
           const data = await res.json();
           setUsage(data);
