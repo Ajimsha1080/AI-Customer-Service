@@ -18,8 +18,14 @@ class Settings(BaseSettings):
     CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://localhost:3001", "http://127.0.0.1:3000", "http://127.0.0.1:3001"]
 
     DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/hospitality_agent_cloud"
+    READ_DATABASE_URL: Optional[str] = None
     PGVECTOR_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/hospitality_agent_cloud"
     REDIS_URL: str = "redis://localhost:6379/0"
+
+    DB_POOL_SIZE: int = 20
+    DB_MAX_OVERFLOW: int = 10
+    DB_POOL_TIMEOUT: int = 30
+    DB_POOL_RECYCLE: int = 1800
 
     OPENAI_API_KEY: Optional[str] = "sk-mock-openai-key-for-dev"
     SARVAM_API_KEY: Optional[str] = None

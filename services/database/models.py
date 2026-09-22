@@ -3,7 +3,7 @@ import enum
 from datetime import datetime, timezone
 from typing import List, Optional
 from sqlalchemy import (
-    Column, String, Text, Boolean, Integer, Float, DateTime, ForeignKey, Enum as SQLEnum, JSON, Numeric
+    Column, String, Text, Boolean, Integer, Float, DateTime, ForeignKey, Enum as SQLEnum, JSON, Numeric, Index
 )
 from sqlalchemy.orm import relationship, Mapped, mapped_column
 from services.database.session import Base
@@ -290,6 +290,10 @@ class Reservation(Base):
 
 class Conversation(Base):
     __tablename__ = "conversations"
+    __table_args__ = (
+        Index("idx_conversations_org_status", "organization_id", "status"),
+        Index("idx_conversations_prop_agent", "property_id", "agent_id"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
     organization_id: Mapped[str] = mapped_column(String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
@@ -305,6 +309,9 @@ class Conversation(Base):
 
 class Message(Base):
     __tablename__ = "messages"
+    __table_args__ = (
+        Index("idx_messages_conv_created", "conversation_id", "created_at"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
     conversation_id: Mapped[str] = mapped_column(String(36), ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False, index=True)
@@ -344,6 +351,9 @@ class VoiceSession(Base):
 
 class UsageEvent(Base):
     __tablename__ = "usage_events"
+    __table_args__ = (
+        Index("idx_usage_events_org_created", "organization_id", "created_at"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
     organization_id: Mapped[str] = mapped_column(String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
