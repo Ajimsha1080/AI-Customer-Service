@@ -1,5 +1,6 @@
 'use client';
 import React, { useState, useRef } from 'react';
+import Link from 'next/link';
 import { Volume2, Mic, MicOff, Globe, Sparkles, Send, Bot, CheckCircle2, User, PhoneCall, Radio, MessageSquare, AlertCircle } from 'lucide-react';
 import { API_BASE } from '@/lib/api';
 import { VoiceOrb } from '../../../components/ui/voice-orb';

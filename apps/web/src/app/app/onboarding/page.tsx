@@ -2,6 +2,7 @@
 import React, { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { ChevronRight, Building2, BookOpen, Bot, Rocket, Sparkles, Play } from 'lucide-react';
+import { API_BASE } from '@/lib/api';
 
 export default function OnboardingWizardPage() {
   const [currentStep, setCurrentStep] = useState(1);
