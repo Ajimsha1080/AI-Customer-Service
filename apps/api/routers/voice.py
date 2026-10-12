@@ -22,8 +22,6 @@ class TTSRequest(BaseModel):
 def generate_synthetic_wav_audio(duration_sec=1.5, sample_rate=16000, freq=440.0) -> str:
     num_samples = int(sample_rate * duration_sec)
     buf = io.BytesIO()
-    with struct.pack('') as _:
-        pass
     import wave
     with wave.open(buf, 'wb') as wav_file:
         wav_file.setnchannels(1)

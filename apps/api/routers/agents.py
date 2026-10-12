@@ -5,8 +5,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from services.database.session import get_db
-from services.database.models import User, Agent, AgentConfig
-from apps.api.auth import get_current_user, verify_tenant_access
+from services.database.models import User, Agent, AgentConfig, UserRole
+from apps.api.auth import get_current_user, verify_tenant_access, ROLE_HIERARCHY
 from packages.agent_sdk.sdk import HospitalityAgentSDK
 from services.agent_runtime.engine import AgentRuntimeEngine
 from services.billing.metering import SaaSMeteringService
@@ -40,9 +40,33 @@ class AgentChatRequest(BaseModel):
     channel: str = "web_widget"
     language: Optional[str] = "English"
 
+VALID_AGENT_TYPES = {"CONCIERGE", "FRONT_DESK", "ROOM_SERVICE", "MAINTENANCE", "HOSTEL_AI_AGENT"}
+
+async def _verify_and_get_agent(agent_id: str, current_user: User, db: AsyncSession, require_mutation: bool = False) -> Agent:
+    stmt = select(Agent).where(Agent.id == agent_id)
+    res = await db.execute(stmt)
+    agent = res.scalar_one_or_none()
+    if not agent:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Agent '{agent_id}' not found.")
+    verify_tenant_access(current_user, agent.organization_id)
+    if require_mutation:
+        caller_role_val = current_user.role.value if hasattr(current_user.role, "value") else str(current_user.role)
+        if ROLE_HIERARCHY.get(caller_role_val, 0) < ROLE_HIERARCHY.get(UserRole.ADMIN, 80):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Admin permissions required to modify agent lifecycle state."
+            )
+    return agent
+
 @router.post("")
 async def create_agent(req: CreateAgentRequest, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     org_id = verify_tenant_access(current_user, req.organization_id)
+    normalized_type = req.agent_type.upper()
+    if normalized_type not in VALID_AGENT_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid agent_type '{req.agent_type}'. Valid types: {sorted(list(VALID_AGENT_TYPES))}"
+        )
     allowed, reason, details = await metering_service.check_billing_quota(org_id, resource="create_agent", db=db)
     if not allowed:
         raise HTTPException(status_code=status.HTTP_402_PAYMENT_REQUIRED, detail=f"Billing quota exceeded: {reason}")
@@ -51,7 +75,7 @@ async def create_agent(req: CreateAgentRequest, current_user: User = Depends(get
         organization_id=org_id,
         property_id=req.property_id,
         name=req.name,
-        agent_type=req.agent_type
+        agent_type=normalized_type
     )
     stmt = select(Agent).where(Agent.id == agent["id"])
     res = await db.execute(stmt)
@@ -62,9 +86,9 @@ async def create_agent(req: CreateAgentRequest, current_user: User = Depends(get
             organization_id=org_id,
             property_id=req.property_id,
             name=req.name,
-            agent_type=req.agent_type,
+            agent_type=normalized_type,
             status="ACTIVE",
-            description=f"Autonomous {req.agent_type} agent."
+            description=f"Autonomous {normalized_type} agent."
         )
         db.add(db_agent)
 
@@ -90,12 +114,7 @@ async def create_agent(req: CreateAgentRequest, current_user: User = Depends(get
 
 @router.put("/{agent_id}")
 async def update_agent(agent_id: str, req: UpdateAgentConfigRequest, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    stmt = select(Agent).where(Agent.id == agent_id)
-    res = await db.execute(stmt)
-    agt = res.scalar_one_or_none()
-    if not agt:
-        raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found.")
-    verify_tenant_access(current_user, agt.organization_id)
+    agt = await _verify_and_get_agent(agent_id, current_user, db, require_mutation=True)
     
     if req.name:
         agt.name = req.name
@@ -150,31 +169,14 @@ async def list_agents(organization_id: Optional[str] = None, property_id: Option
     stmt = stmt.limit(limit).offset(offset)
     res = await db.execute(stmt)
     agents = res.scalars().all()
-    if agents:
-        return [
-            { "id": a.id, "organization_id": a.organization_id, "property_id": a.property_id, "name": a.name, "agent_type": a.agent_type, "status": a.status or "ACTIVE", "description": a.description }
-            for a in agents
-        ]
     return [
-        {
-            "id": "agt_hostel_01",
-            "organization_id": org_id,
-            "property_id": "prop_azure_palm_resort",
-            "name": "Hostel AI Agent",
-            "agent_type": "HOSTEL_AI_AGENT",
-            "status": "ACTIVE",
-            "description": "Autonomous Hostel & Hospitality AI Agent that understands guest questions, decides required tools, executes database actions, and responds in real-time."
-        }
+        { "id": a.id, "organization_id": a.organization_id, "property_id": a.property_id, "name": a.name, "agent_type": a.agent_type, "status": a.status or "ACTIVE", "description": a.description }
+        for a in agents
     ]
 
 @router.get("/{agent_id}")
 async def get_agent(agent_id: str, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    stmt = select(Agent).where(Agent.id == agent_id)
-    res = await db.execute(stmt)
-    agent = res.scalar_one_or_none()
-    if not agent:
-        raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found.")
-    verify_tenant_access(current_user, agent.organization_id)
+    agent = await _verify_and_get_agent(agent_id, current_user, db, require_mutation=False)
     
     cfg_stmt = select(AgentConfig).where(AgentConfig.agent_id == agent_id)
     cfg_res = await db.execute(cfg_stmt)
@@ -198,24 +200,29 @@ async def get_agent(agent_id: str, current_user: User = Depends(get_current_user
     }
 
 @router.post("/{agent_id}/validate")
-async def validate_agent(agent_id: str, current_user: User = Depends(get_current_user)):
+async def validate_agent(agent_id: str, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    await _verify_and_get_agent(agent_id, current_user, db, require_mutation=False)
     valid, msg = await agent_sdk.validateAgent(agent_id)
     return {"agent_id": agent_id, "is_valid": valid, "message": msg}
 
 @router.post("/{agent_id}/deploy")
-async def deploy_agent(agent_id: str, current_user: User = Depends(get_current_user)):
+async def deploy_agent(agent_id: str, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    await _verify_and_get_agent(agent_id, current_user, db, require_mutation=True)
     return await agent_sdk.deployAgent(agent_id)
 
 @router.post("/{agent_id}/pause")
-async def pause_agent(agent_id: str, current_user: User = Depends(get_current_user)):
+async def pause_agent(agent_id: str, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    await _verify_and_get_agent(agent_id, current_user, db, require_mutation=True)
     return await agent_sdk.pauseAgent(agent_id)
 
 @router.post("/{agent_id}/resume")
-async def resume_agent(agent_id: str, current_user: User = Depends(get_current_user)):
+async def resume_agent(agent_id: str, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    await _verify_and_get_agent(agent_id, current_user, db, require_mutation=True)
     return await agent_sdk.resumeAgent(agent_id)
 
 @router.post("/{agent_id}/disable")
-async def disable_agent(agent_id: str, current_user: User = Depends(get_current_user)):
+async def disable_agent(agent_id: str, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    await _verify_and_get_agent(agent_id, current_user, db, require_mutation=True)
     return await agent_sdk.disableAgent(agent_id)
 
 @router.post("/{agent_id}/chat", tags=["Data Plane - Agent Execution"])
@@ -224,14 +231,18 @@ async def agent_chat(agent_id: str, req: AgentChatRequest, db: AsyncSession = De
     agent_stmt = select(Agent).where(Agent.id == agent_id)
     agent_res = await db.execute(agent_stmt)
     agent = agent_res.scalar_one_or_none()
+    if not agent:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Agent '{agent_id}' not found."
+        )
 
-    target_org_id = agent.organization_id if agent else "org_azure_group"
-    if req.organization_id and req.organization_id != target_org_id:
+    if req.organization_id and req.organization_id != agent.organization_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Mismatched organization_id. Agent '{agent_id}' belongs to tenant '{target_org_id}'."
+            detail=f"Mismatched organization_id. Agent '{agent_id}' belongs to tenant '{agent.organization_id}'."
         )
-    effective_org_id = target_org_id
+    effective_org_id = agent.organization_id
 
     allowed, reason, details = await metering_service.check_billing_quota(effective_org_id, resource="agent_turn", db=db)
     if not allowed:
