@@ -3,7 +3,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request, Response
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,8 +17,10 @@ from apps.api.auth import (
     hash_password, verify_password,
     create_access_token, create_refresh_token,
     decode_refresh_token_async, revoke_refresh_token,
-    get_current_user, generate_oauth_state, verify_oauth_state
+    get_current_user, generate_oauth_state, verify_oauth_state,
+    check_login_lockout, record_failed_login, reset_login_failures
 )
+from services.security.limiter import limiter
 
 router = APIRouter(prefix="/api/v1/auth", tags=["Auth"])
 
@@ -54,7 +56,7 @@ class GoogleAuthCallbackRequest(BaseModel):
     redirect_uri: Optional[str] = "http://localhost:3002/auth/callback/google"
 
 @router.post("/register")
-async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
+async def register(req: RegisterRequest, response: Response, db: AsyncSession = Depends(get_db)):
     """Registers a new tenant. ALWAYS provisions a brand-new Organization with a server-generated slug.
     The creator is designated as the tenant OWNER.
     """
@@ -107,6 +109,10 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
     access_token = create_access_token({"sub": user.id, "org_id": user.organization_id, "role": user.role.value if hasattr(user.role, "value") else str(user.role)})
     refresh_token = create_refresh_token({"sub": user.id})
 
+    response.set_cookie(key="access_token", value=access_token, httponly=True, samesite="lax", max_age=1800)
+    response.set_cookie(key="session_token", value=access_token, httponly=True, samesite="lax", max_age=1800)
+    response.set_cookie(key="refresh_token", value=refresh_token, httponly=True, samesite="lax", max_age=7*86400)
+
     return {
         "access_token": access_token,
         "refresh_token": refresh_token,
@@ -122,7 +128,7 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
     }
 
 @router.post("/accept-invitation")
-async def accept_invitation(req: AcceptInvitationRequest, db: AsyncSession = Depends(get_db)):
+async def accept_invitation(req: AcceptInvitationRequest, response: Response, db: AsyncSession = Depends(get_db)):
     """Accepts an organization invitation using a verified token to join an existing tenant."""
     stmt = select(Invitation).where(Invitation.token == req.invitation_token)
     res = await db.execute(stmt)
@@ -186,6 +192,10 @@ async def accept_invitation(req: AcceptInvitationRequest, db: AsyncSession = Dep
     access_token = create_access_token({"sub": user.id, "org_id": user.organization_id, "role": user.role.value if hasattr(user.role, "value") else str(user.role)})
     refresh_token = create_refresh_token({"sub": user.id})
 
+    response.set_cookie(key="access_token", value=access_token, httponly=True, samesite="lax", max_age=1800)
+    response.set_cookie(key="session_token", value=access_token, httponly=True, samesite="lax", max_age=1800)
+    response.set_cookie(key="refresh_token", value=refresh_token, httponly=True, samesite="lax", max_age=7*86400)
+
     return {
         "access_token": access_token,
         "refresh_token": refresh_token,
@@ -200,11 +210,13 @@ async def accept_invitation(req: AcceptInvitationRequest, db: AsyncSession = Dep
     }
 
 @router.post("/login")
-async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
+async def login(req: LoginRequest, response: Response, db: AsyncSession = Depends(get_db)):
+    check_login_lockout(req.email)
     stmt = select(User).where(User.email == req.email)
     res = await db.execute(stmt)
     user = res.scalar_one_or_none()
     if not user or not verify_password(req.password, user.hashed_password):
+        record_failed_login(req.email)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid credentials"
@@ -214,6 +226,8 @@ async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User account is deactivated"
         )
+
+    reset_login_failures(req.email)
 
     await record_audit_log_async(
         org_id=user.organization_id,
@@ -227,6 +241,10 @@ async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
 
     access_token = create_access_token({"sub": user.id, "org_id": user.organization_id, "role": user.role.value if hasattr(user.role, "value") else str(user.role)})
     refresh_token = create_refresh_token({"sub": user.id})
+
+    response.set_cookie(key="access_token", value=access_token, httponly=True, samesite="lax", max_age=1800)
+    response.set_cookie(key="session_token", value=access_token, httponly=True, samesite="lax", max_age=1800)
+    response.set_cookie(key="refresh_token", value=refresh_token, httponly=True, samesite="lax", max_age=7*86400)
 
     return {
         "access_token": access_token,
@@ -355,8 +373,11 @@ async def google_auth_callback(req: GoogleAuthCallbackRequest, db: AsyncSession 
     }
 
 @router.post("/logout")
-async def logout(req: LogoutRequest, db: AsyncSession = Depends(get_db)):
+async def logout(req: LogoutRequest, response: Response, db: AsyncSession = Depends(get_db)):
     await revoke_refresh_token(req.refresh_token, db=db)
+    response.delete_cookie("access_token")
+    response.delete_cookie("session_token")
+    response.delete_cookie("refresh_token")
     return {"message": "Successfully logged out and token invalidated."}
 
 @router.post("/refresh")

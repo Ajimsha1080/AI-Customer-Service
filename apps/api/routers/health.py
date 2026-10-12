@@ -1,11 +1,12 @@
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends
-from sqlalchemy import select, func
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import select, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.api.config import settings
 from services.database.session import get_db
-from services.database.models import Agent, Conversation
+from services.database.models import User, Agent, Conversation
+from apps.api.auth import get_super_admin_user
 
 router = APIRouter(tags=["Health"])
 
@@ -20,21 +21,51 @@ async def health_check():
 
 @router.get("/ready")
 async def readiness_check(db: AsyncSession = Depends(get_db)):
+    """Readiness probe that actually pings DB, Redis, and Vector Store."""
+    # 1. Real DB Ping
     db_status = "connected"
     try:
-        await db.execute(select(1))
+        res = await db.execute(text("SELECT 1"))
+        if res.scalar() != 1:
+            db_status = "degraded"
     except Exception:
-        db_status = "degraded"
+        db_status = "disconnected"
 
+    # 2. Real Redis Ping (No false claim of connected if Redis is down)
+    redis_status = "disconnected"
+    try:
+        import redis.asyncio as aioredis
+        r = aioredis.from_url(settings.REDIS_URL, socket_connect_timeout=0.5)
+        if await r.ping():
+            redis_status = "connected"
+        await r.aclose()
+    except Exception:
+        redis_status = "disconnected"
+
+    # 3. Real Vector Store Check
+    vector_status = "connected"
+    try:
+        if "postgresql" in settings.DATABASE_URL:
+            res = await db.execute(text("SELECT 1 FROM pg_extension WHERE extname = 'vector'"))
+            if not res.scalar():
+                vector_status = "degraded"
+    except Exception:
+        vector_status = "degraded"
+
+    overall_ready = (db_status == "connected" and redis_status == "connected")
     return {
-        "status": "ready" if db_status == "connected" else "degraded",
+        "status": "ready" if overall_ready else "degraded",
         "database": db_status,
-        "redis": "connected",
-        "vector_store": "pgvector_ready"
+        "redis": redis_status,
+        "vector_store": vector_status
     }
 
 @router.get("/metrics")
-async def metrics(db: AsyncSession = Depends(get_db)):
+async def metrics(
+    current_user: User = Depends(get_super_admin_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """0.7 Protected metrics: Super Admin authorization required."""
     agents_res = await db.execute(select(func.count(Agent.id)))
     active_agents = agents_res.scalar() or 0
 
@@ -44,6 +75,5 @@ async def metrics(db: AsyncSession = Depends(get_db)):
     return {
         "active_agents": active_agents,
         "total_conversations": total_conversations,
-        "p95_latency_ms": 380,
         "system_status": "OPERATIONAL"
     }

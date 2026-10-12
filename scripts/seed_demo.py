@@ -12,7 +12,12 @@ from services.database.models import (
 from services.rag.pipeline import RAGPipeline
 from apps.api.config import settings
 
+from apps.api.auth import hash_password
+
 async def seed_demo_data():
+    if settings.ENVIRONMENT.lower() in ("production", "prod"):
+        raise RuntimeError("CRITICAL: Seeding demo data is strictly prohibited in production environments.")
+
     print("Seeding realistic demo dataset for Azure Hospitality Group...")
 
     try:
@@ -72,7 +77,7 @@ async def seed_demo_data():
                 id="usr_azure_admin",
                 organization_id=org.id,
                 email="admin@azurepalm.com",
-                hashed_password="pbkdf2:sha256:demo_hashed_password",
+                hashed_password=hash_password("AzureDemo2026!"),
                 full_name="Azure Group Admin",
                 role=UserRole.ORGANIZATION_ADMIN
             )
@@ -80,7 +85,7 @@ async def seed_demo_data():
                 id="usr_frontdesk_staff",
                 organization_id=org.id,
                 email="concierge@azurepalm.com",
-                hashed_password="pbkdf2:sha256:demo_hashed_password",
+                hashed_password=hash_password("AzureDemo2026!"),
                 full_name="Front Desk Manager",
                 role=UserRole.STAFF
             )

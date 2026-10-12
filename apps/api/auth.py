@@ -41,12 +41,43 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     })
     return jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 
+import uuid
+import hashlib
+
+LOGIN_FAILURES: Dict[str, list] = {}
+LOCKOUT_THRESHOLD = 5
+LOCKOUT_WINDOW_SECONDS = 900  # 15 minutes
+
+def record_failed_login(identifier: str) -> int:
+    """Records a failed login attempt and returns count of recent failures."""
+    now = time.time()
+    attempts = [t for t in LOGIN_FAILURES.get(identifier, []) if t > now - LOCKOUT_WINDOW_SECONDS]
+    attempts.append(now)
+    LOGIN_FAILURES[identifier] = attempts
+    return len(attempts)
+
+def check_login_lockout(identifier: str) -> None:
+    """Raises 429 Too Many Requests if account has exceeded failed login threshold."""
+    now = time.time()
+    attempts = [t for t in LOGIN_FAILURES.get(identifier, []) if t > now - LOCKOUT_WINDOW_SECONDS]
+    LOGIN_FAILURES[identifier] = attempts
+    if len(attempts) >= LOCKOUT_THRESHOLD:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Account temporarily locked due to repeated failed login attempts. Please try again after 15 minutes."
+        )
+
+def reset_login_failures(identifier: str) -> None:
+    """Clears failed login attempt counter upon successful authentication."""
+    LOGIN_FAILURES.pop(identifier, None)
+
 def create_refresh_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
-    """Generates a signed JWT refresh token with 7 day default expiry."""
+    """Generates a signed JWT refresh token with unique jti and 7 day default expiry."""
     to_encode = data.copy()
     now = datetime.now(timezone.utc)
     expire = now + (expires_delta or timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS))
     to_encode.update({
+        "jti": str(uuid.uuid4()),
         "exp": expire,
         "iat": now,
         "token_type": "refresh"
@@ -72,41 +103,49 @@ def decode_access_token(token: str) -> dict:
 
 REFRESH_TOKEN_DENYLIST = set()
 
+def _hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
 async def revoke_refresh_token(token: str, db: Optional[AsyncSession] = None):
-    """Revokes a refresh token in memory and persists it to database."""
+    """Revokes a refresh token in memory and persists hashed token to database."""
+    h = _hash_token(token)
     REFRESH_TOKEN_DENYLIST.add(token)
+    REFRESH_TOKEN_DENYLIST.add(h)
     if db:
-        stmt = select(RevokedToken).where(RevokedToken.token == token)
+        stmt = select(RevokedToken).where((RevokedToken.token == h) | (RevokedToken.token == token))
         res = await db.execute(stmt)
         if not res.scalar_one_or_none():
-            rev = RevokedToken(token=token)
+            rev = RevokedToken(token=h)
             db.add(rev)
             await db.flush()
 
 async def decode_refresh_token_async(token: str, db: Optional[AsyncSession] = None) -> dict:
-    """Decodes and validates a JWT refresh token with persistent DB revocation check."""
-    if token in REFRESH_TOKEN_DENYLIST:
+    """Decodes and validates a JWT refresh token with persistent DB revocation and reuse check."""
+    h = _hash_token(token)
+    if token in REFRESH_TOKEN_DENYLIST or h in REFRESH_TOKEN_DENYLIST:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token has been revoked/logged out."
+            detail="Token has been revoked or reuse detected."
         )
     if db:
-        stmt = select(RevokedToken).where(RevokedToken.token == token)
+        stmt = select(RevokedToken).where((RevokedToken.token == h) | (RevokedToken.token == token))
         res = await db.execute(stmt)
         if res.scalar_one_or_none():
             REFRESH_TOKEN_DENYLIST.add(token)
+            REFRESH_TOKEN_DENYLIST.add(h)
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Token has been revoked/logged out."
+                detail="Token has been revoked or reuse detected."
             )
     return decode_refresh_token(token)
 
 def decode_refresh_token(token: str) -> dict:
     """Decodes and validates a JWT refresh token."""
-    if token in REFRESH_TOKEN_DENYLIST:
+    h = _hash_token(token)
+    if token in REFRESH_TOKEN_DENYLIST or h in REFRESH_TOKEN_DENYLIST:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token has been revoked/logged out."
+            detail="Token has been revoked or reuse detected."
         )
     try:
         payload = jwt.decode(token, settings.JWT_REFRESH_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])

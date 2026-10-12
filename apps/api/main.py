@@ -19,8 +19,7 @@ from services.billing.metering import SaaSMeteringService
 
 metering_service = SaaSMeteringService()
 
-# Configure Limiter
-limiter = Limiter(key_func=get_remote_address, default_limits=["100/minute"])
+from services.security.limiter import limiter
 
 # Configure Logging
 logging.basicConfig(level=logging.INFO if not settings.DEBUG else logging.DEBUG)
@@ -48,11 +47,14 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+# --- RATE LIMITING MIDDLEWARE ---
+from slowapi.middleware import SlowAPIMiddleware
+app.add_middleware(SlowAPIMiddleware)
+
 # --- CORS MIDDLEWARE HARDENING ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
-    allow_origin_regex=r"https?://.*",
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
@@ -133,43 +135,3 @@ app.include_router(integrations.router)
 app.include_router(platform.router)
 app.include_router(conversations.router)
 
-
-async def init_db_and_seed():
-    from services.database.session import AsyncSessionLocal, engine, Base
-    import services.database.models
-    from services.database.models import User, Organization, UserRole
-    from apps.api.auth import hash_password
-    from sqlalchemy import select
-
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-    async with AsyncSessionLocal() as db:
-        res_org = await db.execute(select(Organization).where(Organization.id == "org_azure_group"))
-        org = res_org.scalar_one_or_none()
-        if not org:
-            org = Organization(id="org_azure_group", name="Azure Palm Hostel", slug="azure-palm-hostel")
-            db.add(org)
-            await db.flush()
-
-        users_to_seed = [
-            ("usr_admin_01", "admin@azurehostel.com", UserRole.OWNER, "admin123"),
-            ("usr_demo123", "demo@azurehostel.com", UserRole.STAFF, "admin123"),
-            ("usr_viewer_01", "viewer@azurehostel.com", UserRole.VIEWER, "viewer123"),
-            ("usr_superadmin", "superadmin@azurehostel.com", UserRole.SUPER_ADMIN, "superadmin123"),
-        ]
-
-        for u_id, email, role, pwd in users_to_seed:
-            res_u = await db.execute(select(User).where(User.id == u_id))
-            if not res_u.scalar_one_or_none():
-                u_obj = User(
-                    id=u_id,
-                    organization_id=org.id,
-                    email=email,
-                    hashed_password=hash_password(pwd),
-                    full_name=email.split("@")[0].title(),
-                    role=role,
-                    is_active=True
-                )
-                db.add(u_obj)
-        await db.commit()

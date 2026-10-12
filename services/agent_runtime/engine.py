@@ -38,7 +38,7 @@ class AgentRuntimeEngine:
         user_context: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """Executes a single multi-tenant agent turn supporting Sarvam AI Indic LLM & LiteLLM routing."""
-        user_context = user_context or {"user_role": "resident", "resident_id": "res_default_1"}
+        user_context = user_context or {"user_role": "guest", "user_id": None, "resident_id": None}
         start_time = time.time()
         model_name = agent_config.get("model_name", "sarvam-2b")
         system_prompt = agent_config.get("system_prompt", "You are a professional AI Concierge.")
@@ -249,7 +249,7 @@ class AgentRuntimeEngine:
         **kwargs: Any
     ) -> Dict[str, Any]:
         """Executes a single multi-tenant agent turn with LiteLLM tool calling, LLM moderation guardrails, and timeouts."""
-        user_context = user_context or {"user_role": "resident", "resident_id": "res_default_1"}
+        user_context = user_context or {"user_role": "guest", "user_id": None, "resident_id": None}
         conversation_history = conversation_history or []
         language = user_language or language
         start_time = time.time()

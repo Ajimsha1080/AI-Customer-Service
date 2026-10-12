@@ -242,8 +242,8 @@ class HospitalityToolRegistry:
     ) -> Dict[str, Any]:
         """Authorization wrapper & dispatcher for dynamic hostel & hospitality tools with ERP Access Control."""
         user_context = user_context or {}
-        user_role = user_context.get("user_role", "resident")
-        requesting_user_id = user_context.get("user_id") or user_context.get("resident_id", "res_default_1")
+        user_role = user_context.get("user_role", "guest")
+        requesting_user_id = user_context.get("user_id") or user_context.get("resident_id")
 
         # Convert camelCase tool names to snake_case if needed
         normalized_name = tool_name
@@ -292,7 +292,11 @@ class HospitalityToolRegistry:
                 }
 
             user_scope = policy.get("user_scope", "all_residents")
-            target_user_id = tool_args.get("resident_id") or tool_args.get("target_user_id") or tool_args.get("user_id")
+            # 0.6 Guest Identity: ignore LLM identity arguments for non-staff/admin callers
+            if user_role not in ["staff", "admin"]:
+                target_user_id = requesting_user_id
+            else:
+                target_user_id = tool_args.get("resident_id") or tool_args.get("target_user_id") or tool_args.get("user_id") or requesting_user_id
 
             if user_scope == "admin" and user_role != "admin":
                 return {
@@ -307,6 +311,12 @@ class HospitalityToolRegistry:
                     "error": "I don't have access to that information. Hostel staff permission required."
                 }
             elif user_scope == "own_data" and user_role not in ["staff", "admin"]:
+                if not requesting_user_id:
+                    return {
+                        "success": False,
+                        "tool": tool_name,
+                        "error": "I don't have access to that information. Only verified residents can access resident records."
+                    }
                 if target_user_id and requesting_user_id and target_user_id != requesting_user_id:
                     return {
                         "success": False,

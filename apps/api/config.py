@@ -7,7 +7,7 @@ class Settings(BaseSettings):
     PROJECT_NAME: str = "Hospitality Agent Cloud"
     VERSION: str = "1.0.0"
     ENVIRONMENT: str = "development"
-    DEBUG: bool = True
+    DEBUG: bool = False
     API_V1_STR: str = "/api/v1"
     SECRET_KEY: str = "development_secret_key_change_in_production"
     JWT_SECRET_KEY: str = "dev_jwt_secret_key_change_in_production"

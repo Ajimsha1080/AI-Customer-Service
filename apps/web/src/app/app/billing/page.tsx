@@ -21,11 +21,11 @@ export default function AppBillingPage() {
   useEffect(() => {
     async function fetchSubscriptionData() {
       try {
-        const token = localStorage.getItem('access_token');
         const headers: any = { 'Content-Type': 'application/json' };
-        if (token) headers['Authorization'] = `Bearer ${token}`;
-
-        const res = await fetch(`${API_BASE}/api/v1/billing/subscription`, { headers });
+        const res = await fetch(`${API_BASE}/api/v1/billing/subscription`, {
+          headers,
+          credentials: 'include',
+        });
         if (res.ok) {
           const data = await res.json();
           if (data.subscription) setSubscription(data.subscription);
@@ -43,13 +43,11 @@ export default function AppBillingPage() {
   const handleStripeCheckout = async (targetPlan: string) => {
     setUpgrading(true);
     try {
-      const token = localStorage.getItem('access_token');
       const headers: any = { 'Content-Type': 'application/json' };
-      if (token) headers['Authorization'] = `Bearer ${token}`;
-
       const res = await fetch(`${API_BASE}/api/v1/billing/checkout-session`, {
         method: 'POST',
         headers,
+        credentials: 'include',
         body: JSON.stringify({
           plan_name: targetPlan,
           success_url: window.location.href + '?session=success',

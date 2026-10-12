@@ -94,8 +94,8 @@ async def get_platform_telemetry(current_user: User = Depends(get_super_admin_us
     }
 
 @router.get("/db-health")
-async def get_database_health():
-    """Enterprise Database Health, Pool Status & Latency Monitoring endpoint."""
+async def get_database_health(current_user: User = Depends(get_super_admin_user)):
+    """Enterprise Database Health, Pool Status & Latency Monitoring endpoint. Protected for Super Admin."""
     from services.database.session import check_db_health
     return await check_db_health()
 

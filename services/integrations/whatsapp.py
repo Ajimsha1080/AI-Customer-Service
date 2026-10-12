@@ -1,3 +1,4 @@
+import os
 import hmac
 import hashlib
 import logging
@@ -13,14 +14,18 @@ class WhatsAppCloudAPIClient:
 
     def __init__(self):
         self.api_key = settings.WHATSAPP_API_KEY
-        self.phone_number_id = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "mock_phone_number_id")
-        self.app_secret = os.getenv("WHATSAPP_APP_SECRET", "mock_app_secret")
-        self.verify_token = os.getenv("WHATSAPP_VERIFY_TOKEN", "hospitality_whatsapp_verify_token")
+        self.phone_number_id = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
+        self.app_secret = os.getenv("WHATSAPP_APP_SECRET", "")
+        self.verify_token = os.getenv("WHATSAPP_VERIFY_TOKEN", "")
 
     def verify_webhook_signature(self, payload_bytes: bytes, signature_header: str) -> bool:
         """Verifies X-Hub-Signature-256 header sent by Meta webhooks."""
         if not signature_header or not signature_header.startswith("sha256="):
             return False
+        if not self.app_secret:
+            logger.error("WhatsApp webhook secret is not configured.")
+            return False
+
         expected_hash = hmac.new(
             self.app_secret.encode("utf-8"),
             payload_bytes,
@@ -32,6 +37,8 @@ class WhatsAppCloudAPIClient:
     async def send_text_message(self, recipient_phone: str, text: str) -> Dict[str, Any]:
         """Sends an outbound WhatsApp text message via Meta Graph API."""
         if not self.api_key or self.api_key.startswith("mock"):
+            if settings.ENVIRONMENT not in ("development", "testing"):
+                raise RuntimeError("WhatsApp API key not configured in production environment.")
             logger.info(f"[WhatsApp SIMULATED] To: {recipient_phone} Text: '{text[:50]}...'")
             return {"status": "sent", "mode": "SIMULATED_WHATSAPP", "recipient": recipient_phone}
 
@@ -58,5 +65,3 @@ class WhatsAppCloudAPIClient:
         except Exception as e:
             logger.error(f"WhatsApp API Exception: {e}")
             return {"status": "exception", "detail": str(e)}
-
-import os

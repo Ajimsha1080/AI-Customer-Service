@@ -4,11 +4,12 @@ import base64
 import struct
 import math
 from typing import Optional
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from pydantic import BaseModel
 import httpx
 
 from apps.api.config import settings
+from services.security.limiter import limiter
 
 router = APIRouter(prefix="/api/v1/voice", tags=["Data Plane - Voice Gateway"])
 
@@ -33,7 +34,8 @@ def generate_synthetic_wav_audio(duration_sec=1.5, sample_rate=16000, freq=440.0
     return base64.b64encode(buf.getvalue()).decode('utf-8')
 
 @router.post("/tts")
-async def text_to_speech_gateway(req: TTSRequest):
+@limiter.limit("20/minute")
+async def text_to_speech_gateway(request: Request, req: TTSRequest):
     cache_key = f"{req.language}:{req.text.strip().lower()}"
     if cache_key in TTS_AUDIO_CACHE:
         return {"audio_base64": TTS_AUDIO_CACHE[cache_key], "format": "audio/mp3", "source": "INDIC_VOICE_TTS_CACHED"}

@@ -1,5 +1,5 @@
 from typing import Optional, List
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,6 +10,7 @@ from apps.api.auth import get_current_user, verify_tenant_access, ROLE_HIERARCHY
 from packages.agent_sdk.sdk import HospitalityAgentSDK
 from services.agent_runtime.engine import AgentRuntimeEngine
 from services.billing.metering import SaaSMeteringService
+from services.security.limiter import limiter
 
 router = APIRouter(prefix="/api/v1/agents", tags=["Control Plane - Agents"])
 agent_sdk = HospitalityAgentSDK()
@@ -226,7 +227,8 @@ async def disable_agent(agent_id: str, current_user: User = Depends(get_current_
     return await agent_sdk.disableAgent(agent_id)
 
 @router.post("/{agent_id}/chat", tags=["Data Plane - Agent Execution"])
-async def agent_chat(agent_id: str, req: AgentChatRequest, db: AsyncSession = Depends(get_db)):
+@limiter.limit("30/minute")
+async def agent_chat(request: Request, agent_id: str, req: AgentChatRequest, db: AsyncSession = Depends(get_db)):
     # Strict agent lookup & organization validation
     agent_stmt = select(Agent).where(Agent.id == agent_id)
     agent_res = await db.execute(agent_stmt)

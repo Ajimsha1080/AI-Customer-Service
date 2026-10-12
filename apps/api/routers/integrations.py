@@ -1,20 +1,30 @@
 import time
+import uuid
+import json
 from datetime import datetime, timezone
 from typing import Optional, List, Dict
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request, Query
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from services.database.session import get_db
-from services.database.models import User, KnowledgeDocument, LiveUpdate, IntegrationSource, DataAccessPolicy, AuditLog
+from services.database.models import (
+    User, KnowledgeDocument, LiveUpdate, IntegrationSource, DataAccessPolicy,
+    AuditLog, Agent, AgentStatus, AgentConfig
+)
 from apps.api.auth import get_current_user, verify_tenant_access
 from services.billing.metering import SaaSMeteringService
 from services.rag.vector_store import RAGVectorService
+from services.security.network import validate_outbound_url_ssrf
+from services.security.encryption import encrypt_value, decrypt_value
+from services.agent_runtime.engine import AgentRuntimeEngine
+from services.integrations.whatsapp import WhatsAppCloudAPIClient
 
 router = APIRouter(tags=["Knowledge Base & Integrations"])
 metering_service = SaaSMeteringService()
 rag_service = RAGVectorService()
+whatsapp_client = WhatsAppCloudAPIClient()
 
 class KnowledgeDocumentRequest(BaseModel):
     organization_id: str
@@ -75,7 +85,7 @@ async def upload_knowledge_document(req: KnowledgeDocumentRequest, current_user:
     if any(kw in req.content.lower() for kw in injection_keywords):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Document upload rejected: Potential prompt injection payload detected.")
 
-    doc_id = f"doc_{int(time.time()*1000)}"
+    doc_id = str(uuid.uuid4())
     doc = KnowledgeDocument(
         id=doc_id,
         organization_id=org_id,
@@ -83,6 +93,7 @@ async def upload_knowledge_document(req: KnowledgeDocumentRequest, current_user:
         agent_id=req.agent_id,
         title=req.title,
         content=req.content,
+        content_raw=req.content,
         document_type=req.document_type
     )
     db.add(doc)
@@ -124,13 +135,14 @@ async def query_knowledge_base(req: RAGQueryRequest, current_user: User = Depend
 @router.post("/api/v1/live-updates", tags=["Live Property Announcements"])
 async def create_live_update(req: LiveUpdateRequest, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     org_id = verify_tenant_access(current_user, req.organization_id)
-    upd_id = f"upd_{int(time.time()*1000)}"
+    upd_id = str(uuid.uuid4())
     upd = LiveUpdate(
         id=upd_id,
         organization_id=org_id,
         property_id=req.property_id,
         title=req.title,
         content=req.content,
+        type=req.type,
         update_type=req.type,
         priority=req.priority
     )
@@ -152,7 +164,14 @@ async def list_live_updates(organization_id: Optional[str] = None, property_id: 
 @router.post("/api/v1/live-updates/integrations", tags=["Live Property Announcements"])
 async def connect_integration_source(req: IntegrationSourceRequest, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     org_id = verify_tenant_access(current_user, req.organization_id)
-    src_id = f"src_{int(time.time()*1000)}"
+    # SSRF Protection: forbid loopback, private IPs, and cloud metadata (169.254.169.254)
+    validate_outbound_url_ssrf(req.source_url)
+
+    src_id = str(uuid.uuid4())
+    encrypted_creds = encrypt_value(req.credentials) if req.credentials else None
+    credentials_json = {"encrypted": encrypted_creds} if encrypted_creds else {}
+    masked = "••••••••" if req.credentials else None
+
     src = IntegrationSource(
         id=src_id,
         organization_id=org_id,
@@ -161,12 +180,14 @@ async def connect_integration_source(req: IntegrationSourceRequest, current_user
         source_type=req.source_type,
         source_url=req.source_url,
         auth_type=req.auth_type,
-        credentials_json={"key": req.credentials} if req.credentials else {},
+        credentials_masked=masked,
+        credentials_json=credentials_json,
+        status="CONNECTED",
         sync_status="CONNECTED"
     )
     db.add(src)
     await db.flush()
-    return {"id": src.id, "name": src.name, "status": "CONNECTED"}
+    return {"id": src.id, "name": src.name, "status": "CONNECTED", "credentials_masked": masked}
 
 @router.get("/api/v1/live-updates/integrations", tags=["Live Property Announcements"])
 async def list_integration_sources(organization_id: Optional[str] = None, property_id: Optional[str] = None, limit: int = 50, offset: int = 0, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
@@ -177,7 +198,16 @@ async def list_integration_sources(organization_id: Optional[str] = None, proper
     stmt = stmt.limit(limit).offset(offset)
     res = await db.execute(stmt)
     srcs = res.scalars().all()
-    return [{"id": s.id, "name": s.name, "type": s.source_type, "status": s.sync_status} for s in srcs]
+    return [
+        {
+            "id": s.id,
+            "name": s.name,
+            "type": s.source_type,
+            "status": s.status or s.sync_status,
+            "credentials_masked": s.credentials_masked
+        }
+        for s in srcs
+    ]
 
 @router.delete("/api/v1/live-updates/integrations/{source_id}", tags=["Live Property Announcements"])
 async def delete_integration_source(source_id: str, organization_id: Optional[str] = None, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
@@ -264,7 +294,7 @@ async def update_integration_data_access(source_id: str, req: DataAccessPolicyUp
 
         if not pol:
             pol = DataAccessPolicy(
-                id=f"pol_{cat.category_key}_{int(time.time())}",
+                id=str(uuid.uuid4()),
                 organization_id=org_id,
                 property_id=req.property_id,
                 integration_source_id=source_id,
@@ -299,7 +329,7 @@ async def update_integration_data_access(source_id: str, req: DataAccessPolicyUp
         changes_list.append(f"{actor} saved data access policy settings.")
 
     audit = AuditLog(
-        id=f"audit_access_{int(time.time()*1000)}",
+        id=str(uuid.uuid4()),
         organization_id=org_id,
         user_id=actor,
         action="UPDATE_DATA_ACCESS_POLICY",
@@ -335,24 +365,6 @@ async def get_integration_access_audit_logs(source_id: str, organization_id: Opt
     res = await db.execute(stmt)
     logs = res.scalars().all()
 
-    if not logs:
-        return [
-            {
-                "id": "audit_demo_1",
-                "action": "UPDATE_DATA_ACCESS_POLICY",
-                "actor": "Hostel Admin",
-                "summary": "Admin enabled: Room Information → Resident's own data only",
-                "timestamp": str(datetime.now(timezone.utc))
-            },
-            {
-                "id": "audit_demo_2",
-                "action": "UPDATE_DATA_ACCESS_POLICY",
-                "actor": "Hostel Admin",
-                "summary": "Admin disabled: Payment Information, Attendance, Staff Information",
-                "timestamp": str(datetime.now(timezone.utc))
-            }
-        ]
-
     return [
         {
             "id": l.id,
@@ -365,10 +377,6 @@ async def get_integration_access_audit_logs(source_id: str, organization_id: Opt
     ]
 
 # --- WHATSAPP CLOUD API WEBHOOKS ---
-from fastapi import Request, Query
-from services.integrations.whatsapp import WhatsAppCloudAPIClient
-whatsapp_client = WhatsAppCloudAPIClient()
-
 @router.get("/api/v1/integrations/whatsapp/webhook", tags=["WhatsApp Integration"])
 async def verify_whatsapp_webhook(
     hub_mode: Optional[str] = Query(None, alias="hub.mode"),
@@ -376,16 +384,65 @@ async def verify_whatsapp_webhook(
     hub_verify_token: Optional[str] = Query(None, alias="hub.verify_token")
 ):
     """Meta WhatsApp Webhook Verification Challenge handler."""
+    if not whatsapp_client.verify_token:
+        raise HTTPException(status_code=503, detail="WhatsApp verify token is not configured.")
     if hub_mode == "subscribe" and hub_verify_token == whatsapp_client.verify_token:
         return int(hub_challenge) if hub_challenge and hub_challenge.isdigit() else hub_challenge
     raise HTTPException(status_code=403, detail="WhatsApp Webhook verification failed. Invalid verify_token.")
 
 @router.post("/api/v1/integrations/whatsapp/webhook", tags=["WhatsApp Integration"])
-async def process_whatsapp_inbound_webhook(request: Request):
+async def process_whatsapp_inbound_webhook(request: Request, db: AsyncSession = Depends(get_db)):
     """Processes inbound WhatsApp messages and status updates from Meta."""
     payload_bytes = await request.body()
     signature = request.headers.get("x-hub-signature-256") or ""
-    # In production, verify signature if app_secret is set
-    import json
-    data = json.loads(payload_bytes.decode("utf-8")) if payload_bytes else {}
-    return {"status": "SUCCESS", "events_processed": len(data.get("entry", []))}
+    if not whatsapp_client.verify_webhook_signature(payload_bytes, signature):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid WhatsApp webhook signature.")
+
+    try:
+        data = json.loads(payload_bytes.decode("utf-8")) if payload_bytes else {}
+    except Exception:
+        data = {}
+
+    entries = data.get("entry", [])
+    processed_count = 0
+
+    for entry in entries:
+        for change in entry.get("changes", []):
+            val = change.get("value", {})
+            phone_number_id = val.get("metadata", {}).get("phone_number_id", "")
+            messages = val.get("messages", [])
+            for msg in messages:
+                sender_phone = msg.get("from")
+                msg_body = msg.get("text", {}).get("body", "")
+                if sender_phone and msg_body:
+                    # Look up active agent for tenant
+                    stmt = select(Agent).where(Agent.status == AgentStatus.ACTIVE).limit(1)
+                    agent_res = await db.execute(stmt)
+                    agent = agent_res.scalar_one_or_none()
+
+                    if agent:
+                        cfg_stmt = select(AgentConfig).where(AgentConfig.agent_id == agent.id)
+                        cfg_res = await db.execute(cfg_stmt)
+                        config = cfg_res.scalar_one_or_none()
+
+                        engine = AgentRuntimeEngine(db_session=db)
+                        agent_config_dict = {
+                            "model_name": config.model_name if config else "sarvam-2b",
+                            "system_prompt": config.system_prompt if config else "You are an AI Concierge.",
+                            "enabled_tools": config.enabled_tools if config else []
+                        }
+                        turn = await engine.execute_agent_turn(
+                            agent_config=agent_config_dict,
+                            user_message=msg_body,
+                            conversation_history=[],
+                            organization_id=agent.organization_id,
+                            property_id=agent.property_id,
+                            agent_id=agent.id,
+                            channel="whatsapp",
+                            user_context={"user_role": "guest", "user_id": sender_phone}
+                        )
+                        reply = turn.get("response", "Thank you for contacting us.")
+                        await whatsapp_client.send_text_message(sender_phone, reply)
+                    processed_count += 1
+
+    return {"status": "SUCCESS", "events_processed": processed_count}
