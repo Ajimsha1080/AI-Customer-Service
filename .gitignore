@@ -3,6 +3,7 @@ node_modules/
 .next/
 dist/
 build/
+*.tsbuildinfo
 
 # Python cache & virtualenv
 __pycache__/
