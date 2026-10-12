@@ -8,8 +8,9 @@ from passlib.context import CryptContext
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import secrets
 from apps.api.config import settings
-from services.database.session import get_db
+from services.database.session import get_db, set_tenant_context
 from services.database.models import User, UserRole, RevokedToken
 
 pwd_context = CryptContext(schemes=["argon2"], deprecated="auto")
@@ -157,6 +158,10 @@ async def get_current_user(
             detail="User account is deactivated."
         )
 
+    # Enterprise RLS session binding
+    if user.organization_id:
+        await set_tenant_context(db, user.organization_id)
+
     return user
 
 async def get_optional_current_user(
@@ -170,6 +175,32 @@ async def get_optional_current_user(
         return await get_current_user(credentials=credentials, db=db)
     except Exception:
         return None
+
+ROLE_HIERARCHY = {
+    UserRole.SUPER_ADMIN: 100,
+    UserRole.OWNER: 90,
+    UserRole.ORGANIZATION_ADMIN: 80,
+    UserRole.ADMIN: 80,
+    UserRole.PROPERTY_ADMIN: 60,
+    UserRole.STAFF: 40,
+    UserRole.ANALYST: 30,
+    UserRole.VIEWER: 10,
+}
+
+def require_role(min_role: UserRole):
+    """Enforces minimum role privilege across mutating tenant routes."""
+    async def role_checker(current_user: User = Depends(get_current_user)) -> User:
+        user_val = getattr(current_user.role, "value", str(current_user.role))
+        min_val = getattr(min_role, "value", str(min_role))
+        user_level = ROLE_HIERARCHY.get(user_val, 0)
+        required_level = ROLE_HIERARCHY.get(min_val, 0)
+        if user_level < required_level:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Insufficient permissions. Required role: {min_val}, caller role: {user_val}."
+            )
+        return current_user
+    return role_checker
 
 async def get_super_admin_user(
     current_user: User = Depends(get_current_user)
@@ -197,11 +228,17 @@ def verify_tenant_access(current_user: User, target_org_id: Optional[str]) -> st
     """Verifies user has permission to access target_org_id.
     Super Admins can access any organization.
     Regular users can only access their own organization_id.
-    Returns the resolved organization_id.
+    Zero default fallback to fake or hardcoded organizations.
     """
     if current_user.role == UserRole.SUPER_ADMIN:
-        return target_org_id or current_user.organization_id or "org_azure_group"
-    
+        resolved = target_org_id or current_user.organization_id
+        if not resolved:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Organization ID must be explicitly specified."
+            )
+        return resolved
+
     user_org = current_user.organization_id
     if not user_org:
         raise HTTPException(
@@ -216,4 +253,22 @@ def verify_tenant_access(current_user: User, target_org_id: Optional[str]) -> st
         )
 
     return user_org
+
+def generate_oauth_state() -> str:
+    """Generates a tamper-proof HMAC-signed OAuth state string."""
+    nonce = secrets.token_hex(16)
+    exp = int(time.time()) + 600
+    payload = {"nonce": nonce, "exp": exp, "action": "google_sso"}
+    return jwt.encode(payload, settings.SECRET_KEY, algorithm="HS256")
+
+def verify_oauth_state(state: str) -> bool:
+    """Verifies HMAC signature and expiration of OAuth state string."""
+    if not state:
+        return False
+    try:
+        payload = jwt.decode(state, settings.SECRET_KEY, algorithms=["HS256"])
+        return payload.get("action") == "google_sso"
+    except Exception:
+        return False
+
 

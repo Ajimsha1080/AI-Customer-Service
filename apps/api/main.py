@@ -153,8 +153,9 @@ async def init_db_and_seed():
             await db.flush()
 
         users_to_seed = [
-            ("usr_admin_01", "admin@azurehostel.com", UserRole.ORGANIZATION_ADMIN, "admin123"),
-            ("usr_demo123", "demo@azurehostel.com", UserRole.ORGANIZATION_ADMIN, "admin123"),
+            ("usr_admin_01", "admin@azurehostel.com", UserRole.OWNER, "admin123"),
+            ("usr_demo123", "demo@azurehostel.com", UserRole.STAFF, "admin123"),
+            ("usr_viewer_01", "viewer@azurehostel.com", UserRole.VIEWER, "viewer123"),
             ("usr_superadmin", "superadmin@azurehostel.com", UserRole.SUPER_ADMIN, "superadmin123"),
         ]
 

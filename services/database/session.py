@@ -74,12 +74,10 @@ async def set_tenant_context(session: AsyncSession, tenant_id: str) -> None:
     if "postgresql" in str(session.bind.url):
         await session.execute(text("SET LOCAL app.current_tenant_id = :tenant_id"), {"tenant_id": tenant_id})
 
-async def get_db(tenant_id: Optional[str] = None) -> AsyncGenerator[AsyncSession, None]:
-    """Primary Write Database Dependency with Tenant Context scoping."""
+async def get_db() -> AsyncGenerator[AsyncSession, None]:
+    """Primary Write Database Dependency."""
     async with AsyncSessionLocal() as session:
         try:
-            if tenant_id:
-                await set_tenant_context(session, tenant_id)
             yield session
             if session.is_active:
                 await session.commit()
@@ -97,12 +95,10 @@ async def get_db(tenant_id: Optional[str] = None) -> AsyncGenerator[AsyncSession
                 pass
             await session.close()
 
-async def get_read_db(tenant_id: Optional[str] = None) -> AsyncGenerator[AsyncSession, None]:
+async def get_read_db() -> AsyncGenerator[AsyncSession, None]:
     """Read-Only Replica Database Dependency for high-performance read isolation."""
     async with AsyncReadSessionLocal() as session:
         try:
-            if tenant_id:
-                await set_tenant_context(session, tenant_id)
             yield session
         finally:
             await session.close()
