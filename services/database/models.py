@@ -16,11 +16,14 @@ def get_utc_now():
 
 class UserRole(str, enum.Enum):
     SUPER_ADMIN = "SUPER_ADMIN"
+    OWNER = "OWNER"
+    ADMIN = "ADMIN"
+    STAFF = "STAFF"
+    VIEWER = "VIEWER"
     ORGANIZATION_ADMIN = "ORGANIZATION_ADMIN"
     PROPERTY_ADMIN = "PROPERTY_ADMIN"
     MANAGER = "MANAGER"
     RECEPTIONIST = "RECEPTIONIST"
-    STAFF = "STAFF"
     SUPPORT_AGENT = "SUPPORT_AGENT"
     ANALYST = "ANALYST"
     GUEST = "GUEST"
@@ -49,6 +52,7 @@ class ConversationStatus(str, enum.Enum):
     AI_ACTIVE = "AI_ACTIVE"
     HUMAN_REQUESTED = "HUMAN_REQUESTED"
     HUMAN_ACTIVE = "HUMAN_ACTIVE"
+    HUMAN_STAFF_TAKEN_OVER = "HUMAN_STAFF_TAKEN_OVER"
     WAITING_FOR_CUSTOMER = "WAITING_FOR_CUSTOMER"
     RESOLVED = "RESOLVED"
 
@@ -151,6 +155,7 @@ class Document(Base):
     document_type: Mapped[str] = mapped_column(String(50), default="pdf")
     source_url: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     content_raw: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    content: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=get_utc_now)
 
     agent = relationship("Agent", back_populates="documents")
@@ -175,6 +180,7 @@ class Room(Base):
     __tablename__ = "rooms"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
+    organization_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=True, index=True)
     property_id: Mapped[str] = mapped_column(String(36), ForeignKey("properties.id", ondelete="CASCADE"), nullable=False, index=True)
     room_number: Mapped[str] = mapped_column(String(50), nullable=False)
     room_type: Mapped[str] = mapped_column(String(100), nullable=False)
@@ -189,6 +195,7 @@ class Facility(Base):
     __tablename__ = "facilities"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
+    organization_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=True, index=True)
     property_id: Mapped[str] = mapped_column(String(36), ForeignKey("properties.id", ondelete="CASCADE"), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[str] = mapped_column(String(100), default="Open")
@@ -202,6 +209,7 @@ class Restaurant(Base):
     __tablename__ = "restaurants"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
+    organization_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=True, index=True)
     property_id: Mapped[str] = mapped_column(String(36), ForeignKey("properties.id", ondelete="CASCADE"), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     cuisine: Mapped[str] = mapped_column(String(100), default="Multicuisine")
@@ -215,6 +223,7 @@ class Activity(Base):
     __tablename__ = "activities"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
+    organization_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=True, index=True)
     property_id: Mapped[str] = mapped_column(String(36), ForeignKey("properties.id", ondelete="CASCADE"), nullable=False, index=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -233,6 +242,7 @@ class LiveUpdate(Base):
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     type: Mapped[str] = mapped_column(String(50), default="ANNOUNCEMENT")
+    update_type: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     priority: Mapped[str] = mapped_column(String(20), default="NORMAL")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=get_utc_now)
@@ -250,7 +260,9 @@ class IntegrationSource(Base):
     source_url: Mapped[str] = mapped_column(String(512), nullable=False)
     auth_type: Mapped[str] = mapped_column(String(50), default="API_KEY")
     credentials_masked: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    credentials_json: Mapped[dict] = mapped_column(JSON, default=dict)
     status: Mapped[str] = mapped_column(String(50), default="CONNECTED")
+    sync_status: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     field_mappings: Mapped[dict] = mapped_column(JSON, default=dict)
     last_synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=get_utc_now)
@@ -270,11 +282,11 @@ class DataAccessPolicy(Base):
     updated_by: Mapped[str] = mapped_column(String(255), default="Hostel Admin")
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=get_utc_now)
 
-
 class Reservation(Base):
     __tablename__ = "reservations"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
+    organization_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=True, index=True)
     property_id: Mapped[str] = mapped_column(String(36), ForeignKey("properties.id", ondelete="CASCADE"), nullable=False, index=True)
     room_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("rooms.id", ondelete="SET NULL"), nullable=True)
     customer_name: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -300,6 +312,8 @@ class Conversation(Base):
     property_id: Mapped[str] = mapped_column(String(36), ForeignKey("properties.id", ondelete="CASCADE"), nullable=False, index=True)
     agent_id: Mapped[str] = mapped_column(String(36), ForeignKey("agents.id", ondelete="CASCADE"), nullable=False, index=True)
     channel: Mapped[str] = mapped_column(String(50), default="web_widget")
+    channel_user_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    is_human_takeover: Mapped[bool] = mapped_column(Boolean, default=False)
     status: Mapped[ConversationStatus] = mapped_column(SQLEnum(ConversationStatus), default=ConversationStatus.AI_ACTIVE)
     customer_name: Mapped[str] = mapped_column(String(255), default="Guest")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=get_utc_now)
@@ -372,18 +386,42 @@ class Subscription(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
     organization_id: Mapped[str] = mapped_column(String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
-    plan_name: Mapped[str] = mapped_column(String(50), default="BUSINESS")
+    plan_name: Mapped[str] = mapped_column(String(50), default="FREE")
     status: Mapped[str] = mapped_column(String(50), default="ACTIVE")
-    monthly_price: Mapped[float] = mapped_column(Float, default=499.0)
-    max_agents: Mapped[int] = mapped_column(Integer, default=10)
-    max_properties: Mapped[int] = mapped_column(Integer, default=5)
-    max_conversations_per_month: Mapped[int] = mapped_column(Integer, default=50000)
+    monthly_price: Mapped[float] = mapped_column(Float, default=0.0)
+    max_agents: Mapped[int] = mapped_column(Integer, default=1)
+    max_properties: Mapped[int] = mapped_column(Integer, default=1)
+    max_conversations_per_month: Mapped[int] = mapped_column(Integer, default=100)
     stripe_customer_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
     stripe_subscription_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
     subscription_status: Mapped[str] = mapped_column(String(50), default="active")
+    dunning_attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    dunning_last_failed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    dunning_grace_period_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=get_utc_now)
 
     organization = relationship("Organization", back_populates="subscriptions")
+
+class ProcessedWebhookEvent(Base):
+    __tablename__ = "processed_webhook_events"
+
+    id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    event_id: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    event_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    processed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=get_utc_now)
+
+class Invitation(Base):
+    __tablename__ = "invitations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
+    organization_id: Mapped[str] = mapped_column(String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    email: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    role: Mapped[str] = mapped_column(String(50), default="STAFF")
+    token: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
+    invited_by_user_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    accepted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=get_utc_now)
 
 class AuditLog(Base):
     __tablename__ = "audit_logs"
