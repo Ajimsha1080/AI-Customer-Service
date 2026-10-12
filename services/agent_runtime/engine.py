@@ -35,7 +35,8 @@ class AgentRuntimeEngine:
         agent_id: str,
         channel: str = "web_widget",
         language: str = "English",
-        user_context: Optional[Dict[str, Any]] = None
+        user_context: Optional[Dict[str, Any]] = None,
+        **kwargs: Any
     ) -> Dict[str, Any]:
         """Executes a single multi-tenant agent turn supporting Sarvam AI Indic LLM & LiteLLM routing."""
         user_context = user_context or {"user_role": "guest", "user_id": None, "resident_id": None}

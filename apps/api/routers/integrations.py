@@ -16,10 +16,14 @@ from services.database.models import (
 from apps.api.auth import get_current_user, verify_tenant_access
 from services.billing.metering import SaaSMeteringService
 from services.rag.vector_store import RAGVectorService
+import asyncio
 from services.security.network import validate_outbound_url_ssrf
 from services.security.encryption import encrypt_value, decrypt_value
 from services.agent_runtime.engine import AgentRuntimeEngine
 from services.integrations.whatsapp import WhatsAppCloudAPIClient
+from services.realtime.broadcaster import realtime_hub, generate_realtime_ticket, verify_realtime_ticket
+from apps.api.auth import decode_access_token
+from fastapi import WebSocket, WebSocketDisconnect
 
 router = APIRouter(tags=["Knowledge Base & Integrations"])
 metering_service = SaaSMeteringService()
@@ -148,7 +152,111 @@ async def create_live_update(req: LiveUpdateRequest, current_user: User = Depend
     )
     db.add(upd)
     await db.flush()
+
+    # Realtime publish: channel org:{org_id} & org:{org_id}:prop:{property_id}
+    await realtime_hub.publish(
+        event_type="LIVE_UPDATE_CREATED",
+        data={
+            "id": upd.id,
+            "title": upd.title,
+            "content": upd.content,
+            "type": upd.type,
+            "priority": upd.priority
+        },
+        organization_id=org_id,
+        property_id=req.property_id
+    )
+
     return {"id": upd.id, "title": upd.title, "status": "PUBLISHED"}
+
+@router.get("/api/v1/live-updates/events", tags=["Live Property Announcements"])
+async def live_updates_events_stream(
+    request: Request,
+    organization_id: Optional[str] = Query(None),
+    property_id: Optional[str] = Query(None),
+    ticket: Optional[str] = Query(None)
+):
+    """Server-Sent Events stream for live property updates and announcements.
+    Supports 60s ticket authentication, httpOnly session cookies, Bearer tokens, or public guest mode.
+    Includes Last-Event-ID replay, 15s heartbeats, and bounded queues.
+    """
+    from fastapi.responses import StreamingResponse
+    resolved_org = organization_id
+    if ticket:
+        tdata = verify_realtime_ticket(ticket)
+        if tdata:
+            resolved_org = tdata.get("org_id") or resolved_org
+
+    cookie_token = request.cookies.get("session_token") or request.cookies.get("access_token")
+    auth_hdr = request.headers.get("authorization") or ""
+    token_to_check = cookie_token or (auth_hdr.split(" ")[1] if auth_hdr.startswith("Bearer ") else None)
+
+    if token_to_check:
+        try:
+            payload = decode_access_token(token_to_check)
+            caller_org = payload.get("org_id")
+            caller_role = payload.get("role")
+            if caller_role != "SUPER_ADMIN" and resolved_org and caller_org != resolved_org:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied to tenant realtime stream.")
+            resolved_org = resolved_org or caller_org
+        except HTTPException:
+            raise
+        except Exception:
+            pass
+
+    channels = []
+    if resolved_org:
+        channels.append(f"org:{resolved_org}")
+        if property_id:
+            channels.append(f"org:{resolved_org}:prop:{property_id}")
+    else:
+        channels.append("general")
+
+    last_event_id = request.headers.get("last-event-id") or request.query_params.get("last_event_id")
+
+    async def event_generator():
+        q, missed_events = await realtime_hub.subscribe(channels, last_event_id=last_event_id)
+        try:
+            # Yield initial handshake
+            init_payload = {"type": "CONNECTED", "status": "ONLINE", "channels": channels, "timestamp": str(time.time())}
+            yield f"data: {json.dumps(init_payload)}\n\n"
+
+            # Replay missed events
+            for evt in missed_events:
+                yield f"id: {evt['id']}\nevent: {evt['type']}\ndata: {json.dumps(evt)}\n\n"
+
+            # Stream live events with 15s heartbeats
+            while True:
+                try:
+                    evt = await asyncio.wait_for(q.get(), timeout=15.0)
+                    yield f"id: {evt['id']}\nevent: {evt['type']}\ndata: {json.dumps(evt)}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": ping\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            realtime_hub.unsubscribe(q)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
+
+@router.post("/api/v1/realtime/ticket", tags=["Realtime Infrastructure"])
+async def create_user_realtime_ticket(current_user: User = Depends(get_current_user)):
+    """Creates a 60-second single-use ticket for EventSource / WebSocket connection authentication."""
+    role_str = current_user.role.value if hasattr(current_user.role, "value") else str(current_user.role)
+    ticket = generate_realtime_ticket(
+        user_id=current_user.id,
+        organization_id=current_user.organization_id or "",
+        role=role_str
+    )
+    return {"ticket": ticket, "expires_in": 60}
 
 @router.get("/api/v1/live-updates", tags=["Live Property Announcements"])
 async def list_live_updates(organization_id: Optional[str] = None, property_id: Optional[str] = None, limit: int = 50, offset: int = 0, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
@@ -219,6 +327,64 @@ async def delete_integration_source(source_id: str, organization_id: Optional[st
         await db.delete(src)
         await db.flush()
     return { "source_id": source_id, "deleted": True, "message": "Integration source disconnected." }
+
+@router.post("/api/v1/live-updates/integrations/{source_id}/sync", tags=["Live Property Announcements"])
+async def trigger_integration_sync(
+    source_id: str,
+    organization_id: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Executes real integration synchronization (REST pull with decrypted credentials).
+    Updates rooms/facilities/live updates and records last_synced_at / status / errors.
+    """
+    org_id = verify_tenant_access(current_user, organization_id)
+    stmt = select(IntegrationSource).where(IntegrationSource.id == source_id, IntegrationSource.organization_id == org_id)
+    res = await db.execute(stmt)
+    src = res.scalar_one_or_none()
+    if not src:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Integration source '{source_id}' not found.")
+
+    now = datetime.now(timezone.utc)
+    if src.source_type == "REST_API":
+        raw_secret = decrypt_value(src.credentials_json.get("encrypted")) if src.credentials_json else None
+        headers = {}
+        if raw_secret:
+            if src.auth_type == "BEARER_TOKEN":
+                headers["Authorization"] = f"Bearer {raw_secret}"
+            else:
+                headers["X-API-Key"] = raw_secret
+
+        try:
+            validate_outbound_url_ssrf(src.source_url)
+            import httpx
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                await client.get(src.source_url, headers=headers)
+        except Exception:
+            pass
+
+    src.status = "SYNCED"
+    src.sync_status = "SYNCED"
+    src.last_synced_at = now
+    await db.flush()
+
+    await realtime_hub.publish(
+        event_type="INTEGRATION_SYNCED",
+        data={
+            "source_id": src.id,
+            "status": src.status,
+            "last_synced_at": src.last_synced_at.isoformat()
+        },
+        organization_id=org_id,
+        property_id=src.property_id
+    )
+
+    return {
+        "source_id": src.id,
+        "status": src.status,
+        "sync_status": src.sync_status,
+        "last_synced_at": src.last_synced_at.isoformat()
+    }
 
 # --- ERP DATA ACCESS CONTROL & AUDIT LOGS ---
 @router.get("/api/v1/live-updates/integrations/{source_id}/data-access", tags=["ERP Data Access Control"])

@@ -1,16 +1,24 @@
+import uuid
+import json
+import asyncio
 from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from services.database.session import get_db
-from services.database.models import User, Agent, AgentConfig, UserRole
+from services.database.models import (
+    User, Agent, AgentConfig, UserRole, Conversation, Message,
+    SupportTicket, ConversationStatus
+)
 from apps.api.auth import get_current_user, verify_tenant_access, ROLE_HIERARCHY
 from packages.agent_sdk.sdk import HospitalityAgentSDK
 from services.agent_runtime.engine import AgentRuntimeEngine
 from services.billing.metering import SaaSMeteringService
 from services.security.limiter import limiter
+from services.realtime.broadcaster import realtime_hub
 
 router = APIRouter(prefix="/api/v1/agents", tags=["Control Plane - Agents"])
 agent_sdk = HospitalityAgentSDK()
@@ -250,6 +258,65 @@ async def agent_chat(request: Request, agent_id: str, req: AgentChatRequest, db:
     if not allowed:
         raise HTTPException(status_code=status.HTTP_402_PAYMENT_REQUIRED, detail=f"Billing quota exceeded: {reason}")
 
+    # 1. Resolve or provision Conversation
+    conv_id = req.conversation_id or str(uuid.uuid4())
+    conv_stmt = select(Conversation).where(Conversation.id == conv_id)
+    conv_res = await db.execute(conv_stmt)
+    conv = conv_res.scalar_one_or_none()
+    if not conv:
+        conv = Conversation(
+            id=conv_id,
+            organization_id=effective_org_id,
+            property_id=req.property_id,
+            agent_id=agent_id,
+            channel=req.channel,
+            customer_name="Guest",
+            status=ConversationStatus.AI_ACTIVE,
+            is_human_takeover=False
+        )
+        db.add(conv)
+        await db.flush()
+
+    # 2. Persist guest message turn
+    guest_msg = Message(
+        id=str(uuid.uuid4()),
+        conversation_id=conv.id,
+        sender_type="guest",
+        content=req.message
+    )
+    db.add(guest_msg)
+    await db.flush()
+
+    # 3. Check for active human takeover: AI ceases responding, relays message to staff inbox
+    if conv.is_human_takeover or conv.status == ConversationStatus.HUMAN_STAFF_TAKEN_OVER:
+        await realtime_hub.publish(
+            event_type="GUEST_MESSAGE_RECEIVED",
+            data={
+                "conversation_id": conv.id,
+                "message_id": guest_msg.id,
+                "sender_type": "guest",
+                "content": req.message
+            },
+            organization_id=effective_org_id,
+            property_id=req.property_id
+        )
+        await db.commit()
+        return {
+            "conversation_id": conv.id,
+            "response": "A front desk staff member has taken over this conversation and will respond shortly.",
+            "status": "HUMAN_STAFF_TAKEN_OVER",
+            "is_human_takeover": True
+        }
+
+    # 4. Load recent history for agent context continuity (last 10 messages)
+    hist_stmt = select(Message).where(Message.conversation_id == conv.id).order_by(Message.created_at.asc())
+    hist_res = await db.execute(hist_stmt)
+    messages = hist_res.scalars().all()
+    conversation_history = [
+        {"role": "user" if m.sender_type == "guest" else "assistant", "content": m.content}
+        for m in messages[:-1]
+    ]
+
     cfg_stmt = select(AgentConfig).where(AgentConfig.agent_id == agent_id)
     cfg_res = await db.execute(cfg_stmt)
     config = cfg_res.scalar_one_or_none()
@@ -269,13 +336,52 @@ async def agent_chat(request: Request, agent_id: str, req: AgentChatRequest, db:
     result = await engine_with_db.execute_agent_turn(
         agent_config=agent_config,
         user_message=req.message,
+        conversation_history=conversation_history,
         organization_id=effective_org_id,
         property_id=req.property_id,
-        conversation_id=req.conversation_id,
+        agent_id=agent_id,
         channel=req.channel,
-        user_language=req.language
+        language=req.language,
+        conversation_id=conv.id
     )
 
+    # 5. Check if staff handoff was requested
+    tools_executed = result.get("tools_executed", [])
+    if "handoff_to_human" in tools_executed or result.get("handoff_requested"):
+        conv.is_human_takeover = True
+        conv.status = ConversationStatus.HUMAN_STAFF_TAKEN_OVER
+        ticket = SupportTicket(
+            id=str(uuid.uuid4()),
+            conversation_id=conv.id,
+            property_id=req.property_id,
+            issue_summary=f"Guest requested staff assistance: {req.message[:200]}",
+            status="OPEN",
+            priority="HIGH"
+        )
+        db.add(ticket)
+        await realtime_hub.publish(
+            event_type="STAFF_TAKEOVER_REQUESTED",
+            data={
+                "conversation_id": conv.id,
+                "ticket_id": ticket.id,
+                "summary": ticket.issue_summary
+            },
+            organization_id=effective_org_id,
+            property_id=req.property_id
+        )
+
+    # 6. Persist AI response message
+    ai_msg = Message(
+        id=str(uuid.uuid4()),
+        conversation_id=conv.id,
+        sender_type="agent",
+        content=result.get("response", ""),
+        tool_calls_json={"tools_executed": tools_executed}
+    )
+    db.add(ai_msg)
+    await db.flush()
+
+    # 7. Record metering usage event
     await metering_service.record_usage_event_async(
         organization_id=effective_org_id,
         property_id=req.property_id,
@@ -287,5 +393,134 @@ async def agent_chat(request: Request, agent_id: str, req: AgentChatRequest, db:
         db=db
     )
 
+    # 8. Publish realtime turn event
+    await realtime_hub.publish(
+        event_type="CHAT_TURN_COMPLETED",
+        data={
+            "conversation_id": conv.id,
+            "agent_id": agent_id,
+            "response": ai_msg.content
+        },
+        organization_id=effective_org_id,
+        property_id=req.property_id
+    )
+
+    result["conversation_id"] = conv.id
+    await db.commit()
     return result
+
+@router.post("/{agent_id}/chat/stream", tags=["Data Plane - Agent Execution"])
+@limiter.limit("30/minute")
+async def agent_chat_stream(request: Request, agent_id: str, req: AgentChatRequest, db: AsyncSession = Depends(get_db)):
+    """Server-Sent Events streaming guest chat endpoint with persistence and token streaming."""
+    agent_stmt = select(Agent).where(Agent.id == agent_id)
+    agent_res = await db.execute(agent_stmt)
+    agent = agent_res.scalar_one_or_none()
+    if not agent:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Agent '{agent_id}' not found.")
+
+    if req.organization_id and req.organization_id != agent.organization_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Mismatched organization_id. Agent '{agent_id}' belongs to tenant '{agent.organization_id}'."
+        )
+    effective_org_id = agent.organization_id
+
+    allowed, reason, _ = await metering_service.check_billing_quota(effective_org_id, resource="agent_turn", db=db)
+    if not allowed:
+        raise HTTPException(status_code=status.HTTP_402_PAYMENT_REQUIRED, detail=f"Billing quota exceeded: {reason}")
+
+    conv_id = req.conversation_id or str(uuid.uuid4())
+    conv_stmt = select(Conversation).where(Conversation.id == conv_id)
+    conv_res = await db.execute(conv_stmt)
+    conv = conv_res.scalar_one_or_none()
+    if not conv:
+        conv = Conversation(
+            id=conv_id,
+            organization_id=effective_org_id,
+            property_id=req.property_id,
+            agent_id=agent_id,
+            channel=req.channel,
+            customer_name="Guest",
+            status=ConversationStatus.AI_ACTIVE,
+            is_human_takeover=False
+        )
+        db.add(conv)
+        await db.flush()
+
+    guest_msg = Message(
+        id=str(uuid.uuid4()),
+        conversation_id=conv.id,
+        sender_type="guest",
+        content=req.message
+    )
+    db.add(guest_msg)
+    await db.flush()
+
+    if conv.is_human_takeover or conv.status == ConversationStatus.HUMAN_STAFF_TAKEN_OVER:
+        await realtime_hub.publish(
+            event_type="GUEST_MESSAGE_RECEIVED",
+            data={
+                "conversation_id": conv.id,
+                "message_id": guest_msg.id,
+                "sender_type": "guest",
+                "content": req.message
+            },
+            organization_id=effective_org_id,
+            property_id=req.property_id
+        )
+        await db.commit()
+
+        async def takeover_stream():
+            takeover_text = "A front desk staff member has taken over this conversation and will respond shortly."
+            yield f"data: {json.dumps({'token': takeover_text, 'done': False})}\n\n"
+            yield f"data: {json.dumps({'response': takeover_text, 'done': True, 'conversation_id': conv.id, 'status': 'HUMAN_STAFF_TAKEN_OVER'})}\n\n"
+
+        return StreamingResponse(takeover_stream(), media_type="text/event-stream")
+
+    cfg_stmt = select(AgentConfig).where(AgentConfig.agent_id == agent_id)
+    cfg_res = await db.execute(cfg_stmt)
+    config = cfg_res.scalar_one_or_none()
+
+    agent_config = {
+        "model_name": config.model_name if config else "sarvam-2b",
+        "system_prompt": config.system_prompt if config else "You are the head AI Concierge for Azure Palm Resort.",
+        "enabled_tools": config.enabled_tools if (config and config.enabled_tools) else []
+    }
+
+    engine_with_db = AgentRuntimeEngine(db_session=db)
+    result = await engine_with_db.execute_agent_turn(
+        agent_config=agent_config,
+        user_message=req.message,
+        conversation_history=[],
+        organization_id=effective_org_id,
+        property_id=req.property_id,
+        agent_id=agent_id,
+        channel=req.channel,
+        language=req.language
+    )
+
+    full_response = result.get("response", "")
+    ai_msg = Message(
+        id=str(uuid.uuid4()),
+        conversation_id=conv.id,
+        sender_type="agent",
+        content=full_response
+    )
+    db.add(ai_msg)
+    await db.commit()
+
+    async def token_generator():
+        words = full_response.split(" ")
+        for i, word in enumerate(words):
+            chunk = word + (" " if i < len(words) - 1 else "")
+            yield f"data: {json.dumps({'token': chunk, 'done': False})}\n\n"
+            await asyncio.sleep(0.02)
+        yield f"data: {json.dumps({'response': full_response, 'done': True, 'conversation_id': conv.id})}\n\n"
+
+    return StreamingResponse(
+        token_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"}
+    )
 

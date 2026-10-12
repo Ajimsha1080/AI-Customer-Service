@@ -45,6 +45,8 @@ async def list_conversations(
         for c in convs
     ]
 
+from services.realtime.broadcaster import realtime_hub
+
 @router.post("/{conversation_id}/takeover")
 async def takeover_conversation(
     conversation_id: str,
@@ -67,6 +69,17 @@ async def takeover_conversation(
     conv.status = ConversationStatus.HUMAN_STAFF_TAKEN_OVER
     conv.is_human_takeover = True
     await db.flush()
+
+    await realtime_hub.publish(
+        event_type="HUMAN_TAKEOVER",
+        data={
+            "conversation_id": conversation_id,
+            "staff_user_id": current_user.id,
+            "status": "HUMAN_STAFF_TAKEN_OVER"
+        },
+        organization_id=conv.organization_id,
+        property_id=conv.property_id
+    )
 
     return {
         "conversation_id": conversation_id,
@@ -111,7 +124,7 @@ async def send_staff_message(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    """Staff inbox reply endpoint: persists message from staff into conversation history."""
+    """Staff inbox reply endpoint: persists message from staff into conversation history and relays via pubsub."""
     stmt = select(Conversation).where(Conversation.id == conversation_id)
     res = await db.execute(stmt)
     conv = res.scalar_one_or_none()
@@ -131,6 +144,18 @@ async def send_staff_message(
     )
     db.add(msg)
     await db.flush()
+
+    await realtime_hub.publish(
+        event_type="STAFF_REPLY",
+        data={
+            "conversation_id": conversation_id,
+            "message_id": msg.id,
+            "sender_type": "STAFF",
+            "content": msg.content
+        },
+        organization_id=conv.organization_id,
+        property_id=conv.property_id
+    )
 
     return {
         "id": msg.id,
