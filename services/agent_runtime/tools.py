@@ -330,11 +330,7 @@ class HospitalityToolRegistry:
                 }
 
             user_scope = policy.get("user_scope", "all_residents")
-            # 0.6 Guest Identity: ignore LLM identity arguments for non-staff/admin callers
-            if user_role not in ["staff", "admin"]:
-                target_user_id = requesting_user_id
-            else:
-                target_user_id = tool_args.get("resident_id") or tool_args.get("target_user_id") or tool_args.get("user_id") or requesting_user_id
+            arg_user_id = tool_args.get("resident_id") or tool_args.get("target_user_id") or tool_args.get("user_id")
 
             if user_scope == "admin" and user_role != "admin":
                 return {
@@ -355,12 +351,13 @@ class HospitalityToolRegistry:
                         "tool": tool_name,
                         "error": "I don't have access to that information. Only verified residents can access resident records."
                     }
-                if target_user_id and requesting_user_id and target_user_id != requesting_user_id:
+                if arg_user_id and arg_user_id != requesting_user_id:
                     return {
                         "success": False,
                         "tool": tool_name,
                         "error": "I don't have access to that information. You may only view your own resident record."
                     }
+                tool_args["resident_id"] = requesting_user_id
 
         handler = getattr(self, f"tool_{normalized_name}", None) or getattr(self, f"tool_{tool_name}", None)
         if not handler:
@@ -548,6 +545,9 @@ class HospitalityToolRegistry:
                     "operating_hours": getattr(r, "operating_hours", "07:00 AM - 11:00 PM"),
                     "menu": r.menu_json or []
                 }
+                if isinstance(r.menu_json, dict):
+                    for k, v in r.menu_json.items():
+                        menu_info[k.lower()] = v
             return {
                 "day": args.get("day", "Today"),
                 "meal_type": args.get("meal_type", "All Meals"),

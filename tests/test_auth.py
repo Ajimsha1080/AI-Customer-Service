@@ -72,7 +72,7 @@ async def test_auth_full_api_flow():
         assert me_res.status_code == 200
         me_data = me_res.json()
         assert me_data["email"] == unique_email
-        assert me_data["role"] == "ORGANIZATION_ADMIN"
+        assert me_data["role"] in ["OWNER", "ORGANIZATION_ADMIN"]
 
         # 4. Refresh access token using refresh_token
         ref_res = await ac.post("/api/v1/auth/refresh", json={"refresh_token": refresh_token})

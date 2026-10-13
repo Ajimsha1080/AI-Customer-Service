@@ -26,18 +26,20 @@ async def test_super_admin_telemetry_endpoint():
 @pytest.mark.asyncio
 async def test_super_admin_event_privacy_filtering():
     """Verify that events broadcasted to Super Admin stream strip PII and sensitive data."""
-    q = await live_broadcaster.subscribe()
+    q, _ = await live_broadcaster.subscribe(["platform"])
     
     # Broadcast an event containing operational summary
-    raw_event = {
-        "type": "LIVE_FOOD_UPDATE",
-        "organization_id": "org_azure_group",
+    raw_data = {
         "org_name": "Azure Palm Hostel",
         "title": "Dinner timing updated to 08:00 PM",
         "status": "ONLINE",
         "timestamp": "Just now"
     }
-    await live_broadcaster.broadcast(raw_event)
+    await live_broadcaster.publish(
+        event_type="LIVE_FOOD_UPDATE",
+        data=raw_data,
+        organization_id="org_azure_group"
+    )
     
     received = await q.get()
     assert received["type"] == "LIVE_FOOD_UPDATE"
@@ -47,5 +49,6 @@ async def test_super_admin_event_privacy_filtering():
     forbidden_pii_keys = ["resident_name", "password", "ssn", "credit_card", "api_key", "phone_number"]
     for key in forbidden_pii_keys:
         assert key not in received
+        assert key not in received.get("data", {})
 
     live_broadcaster.unsubscribe(q)

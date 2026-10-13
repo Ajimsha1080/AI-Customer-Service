@@ -1,7 +1,7 @@
 import pytest
 import uuid
 from fastapi.testclient import TestClient
-from sqlalchemy import select, func
+from sqlalchemy import select, func, delete
 from apps.api.main import app, get_db, metering_service
 from apps.api.auth import create_access_token
 from services.database.models import User, UserRole, Organization, Property, Agent, Subscription, UsageEvent, Document
@@ -13,7 +13,7 @@ def api_client():
 
 @pytest.fixture
 def auth_headers():
-    token = create_access_token(data={"sub": "usr_demo123", "org_id": "org_azure_group", "role": "ORGANIZATION_ADMIN"})
+    token = create_access_token(data={"sub": "usr_superadmin", "org_id": "org_azure_group", "role": "SUPER_ADMIN"})
     return {"Authorization": f"Bearer {token}"}
 
 @pytest.mark.asyncio
@@ -45,10 +45,15 @@ async def test_subscription_status_retrieval_and_upgrade(api_client, auth_header
 @pytest.mark.asyncio
 async def test_agent_creation_quota_enforcement(api_client, auth_headers):
     """Phase 4 Requirement: Enforce agent creation quota limits (returns 402 when exceeded)."""
+    # Clean up non-default agents for org
+    async with AsyncSessionLocal() as session:
+        await session.execute(delete(Agent).where(Agent.organization_id == "org_azure_group", Agent.id != "agt_hostel_01"))
+        await session.commit()
+
     # Downscale org to FREE tier (max 1 agent)
     api_client.post("/api/v1/billing/subscription/upgrade", headers=auth_headers, json={"plan_name": "FREE"})
 
-    # Attempt creating agents until FREE tier limit (1 agent) is exceeded
+    # Since agt_hostel_01 already exists (1/1), creating another agent must trigger 402
     res1 = api_client.post(
         "/api/v1/agents",
         headers=auth_headers,
@@ -59,18 +64,8 @@ async def test_agent_creation_quota_enforcement(api_client, auth_headers):
             "agent_type": "CONCIERGE"
         }
     )
-    res2 = api_client.post(
-        "/api/v1/agents",
-        headers=auth_headers,
-        json={
-            "organization_id": "org_azure_group",
-            "property_id": "prop_azure_palm_resort",
-            "name": "Quota Agent 2",
-            "agent_type": "CONCIERGE"
-        }
-    )
-    failed_res = res1 if res1.status_code == 402 else res2
-    assert "Billing quota exceeded" in failed_res.json()["detail"]
+    assert res1.status_code == 402
+    assert "Billing quota exceeded" in res1.json()["detail"]
 
     # Restore to BUSINESS tier
     api_client.post("/api/v1/billing/subscription/upgrade", headers=auth_headers, json={"plan_name": "BUSINESS"})
@@ -82,13 +77,14 @@ async def test_document_upload_quota_enforcement(api_client, auth_headers):
     api_client.post("/api/v1/billing/subscription/upgrade", headers=auth_headers, json={"plan_name": "STARTER"})
 
     async with AsyncSessionLocal() as session:
+        await session.execute(delete(Document).where(Document.organization_id == "org_azure_group"))
         # Seed 10 dummy documents for org_azure_group
         for i in range(10):
             session.add(Document(
                 id=f"doc_quota_{i}_{uuid.uuid4().hex[:6]}",
                 organization_id="org_azure_group",
                 property_id="prop_azure_palm_resort",
-                agent_id="agt_001",
+                agent_id="agt_hostel_01",
                 title=f"Quota Doc {i}",
                 document_type="PDF",
                 content_raw="Sample content"

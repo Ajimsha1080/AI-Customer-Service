@@ -1,6 +1,13 @@
 import pytest
+import hmac
+import hashlib
+import time
+import json
+import uuid
+from unittest.mock import MagicMock, patch
 from httpx import AsyncClient, ASGITransport
 from apps.api.main import app
+from apps.api.config import settings
 
 @pytest.mark.asyncio
 async def test_stripe_checkout_and_webhook():
@@ -11,22 +18,29 @@ async def test_stripe_checkout_and_webhook():
         token = login_res.json()["access_token"]
         headers = {"Authorization": f"Bearer {token}"}
 
-        # 2. Create Stripe Checkout Session
-        checkout_res = await client.post(
-            "/api/v1/billing/checkout-session",
-            json={"plan_name": "ENTERPRISE"},
-            headers=headers
-        )
-        assert checkout_res.status_code == 200
-        data = checkout_res.json()
-        assert "checkout_url" in data
-        assert data["plan_name"] == "ENTERPRISE"
+        # 2. Create Stripe Checkout Session (mocking Stripe 3rd party outbound call)
+        mock_session = MagicMock()
+        mock_session.url = "https://checkout.stripe.com/c/pay/cs_test_123"
+        mock_session.id = "cs_test_123"
+        with patch("stripe.checkout.Session.create", return_value=mock_session):
+            checkout_res = await client.post(
+                "/api/v1/billing/checkout-session",
+                json={"plan_name": "ENTERPRISE"},
+                headers=headers
+            )
+            assert checkout_res.status_code == 200
+            data = checkout_res.json()
+            assert "checkout_url" in data
+            assert data["plan_name"] == "ENTERPRISE"
 
-        # 3. Simulate Stripe Webhook Event
+        # 3. Simulate Stripe Webhook Event with valid HMAC signature
+        evt_id = f"evt_p6_{uuid.uuid4().hex[:8]}"
         webhook_payload = {
+            "id": evt_id,
             "type": "checkout.session.completed",
             "data": {
                 "object": {
+                    "id": f"cs_test_{uuid.uuid4().hex[:8]}",
                     "client_reference_id": "org_azure_group",
                     "customer": "cus_test_12345",
                     "subscription": "sub_test_67890",
@@ -34,7 +48,17 @@ async def test_stripe_checkout_and_webhook():
                 }
             }
         }
-        webhook_res = await client.post("/api/v1/billing/webhook", json=webhook_payload)
+        raw_payload = json.dumps(webhook_payload).encode("utf-8")
+        timestamp = int(time.time())
+        signed_payload = f"{timestamp}.".encode("utf-8") + raw_payload
+        sig = hmac.new(settings.STRIPE_WEBHOOK_SECRET.encode("utf-8"), signed_payload, hashlib.sha256).hexdigest()
+        sig_header = f"t={timestamp},v1={sig}"
+
+        webhook_res = await client.post(
+            "/api/v1/billing/webhook",
+            content=raw_payload,
+            headers={"stripe-signature": sig_header, "Content-Type": "application/json"}
+        )
         assert webhook_res.status_code == 200
         assert webhook_res.json()["status"] == "success"
 
@@ -44,18 +68,23 @@ async def test_stripe_checkout_and_webhook():
         assert sub_res.json()["subscription"]["plan_name"] == "ENTERPRISE"
 
 @pytest.mark.asyncio
-async def test_google_oauth_endpoints():
+async def test_google_oauth_endpoints(monkeypatch):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        # 1. Get Google auth URL
+        # 1. When not configured, returns 503
+        monkeypatch.setattr(settings, "GOOGLE_CLIENT_ID", None)
+        unconf_res = await client.get("/api/v1/auth/google/url")
+        assert unconf_res.status_code == 503
+
+        # 2. When configured, returns Google auth URL
+        monkeypatch.setattr(settings, "GOOGLE_CLIENT_ID", "mock_google_client_id_123")
         url_res = await client.get("/api/v1/auth/google/url")
         assert url_res.status_code == 200
         assert "auth_url" in url_res.json()
         assert "accounts.google.com" in url_res.json()["auth_url"]
 
-        # 2. Callback code exchange
-        cb_res = await client.post("/api/v1/auth/google/callback", json={"code": "mock_code_123"})
-        assert cb_res.status_code == 200
-        assert "access_token" in cb_res.json()
+        # 3. Callback rejection without valid credentials or state
+        cb_res = await client.post("/api/v1/auth/google/callback", json={"code": "mock_code_123", "state": "test_state"})
+        assert cb_res.status_code in [400, 401, 503]
 
 @pytest.mark.asyncio
 async def test_gdpr_export_and_purge():

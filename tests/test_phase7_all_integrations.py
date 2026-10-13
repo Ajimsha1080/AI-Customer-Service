@@ -4,8 +4,11 @@ from apps.api.main import app
 from services.rag.storage import get_storage_provider, LocalStorageProvider
 from services.tasks.worker import async_ingest_and_embed_document
 
+from apps.api.routers.integrations import whatsapp_client
+
 @pytest.mark.asyncio
 async def test_whatsapp_webhook_verification():
+    whatsapp_client.verify_token = "hospitality_whatsapp_verify_token"
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         res = await client.get("/api/v1/integrations/whatsapp/webhook?hub.mode=subscribe&hub.challenge=123456&hub.verify_token=hospitality_whatsapp_verify_token")
         assert res.status_code == 200
