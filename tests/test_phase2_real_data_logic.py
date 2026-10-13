@@ -3,6 +3,7 @@ import io
 import os
 import uuid
 from httpx import AsyncClient, ASGITransport
+from sqlalchemy import delete
 from apps.api.main import app
 from services.agent_runtime.tools import HospitalityToolRegistry
 from services.database.session import AsyncSessionLocal
@@ -72,6 +73,7 @@ async def ensure_p2_db():
             )
             session.add(user_viewer)
 
+        await session.execute(delete(Document).where(Document.organization_id == "org_p2_test"))
         await session.commit()
 
 @pytest.mark.asyncio

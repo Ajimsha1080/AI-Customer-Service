@@ -211,7 +211,7 @@ async def accept_invitation(req: AcceptInvitationRequest, response: Response, db
     }
 
 @router.post("/login")
-@limiter.limit("5/minute")
+@limiter.limit("30/minute")
 async def login(request: Request, req: LoginRequest, response: Response, db: AsyncSession = Depends(get_db)):
     check_login_lockout(req.email)
     stmt = select(User).where(User.email == req.email)
