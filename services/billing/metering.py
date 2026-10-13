@@ -4,15 +4,15 @@ from typing import Dict, Any, List, Optional, Tuple
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from services.database.session import AsyncSessionLocal
-from services.database.models import UsageEvent, Subscription, Agent, Document
+from services.database.models import UsageEvent, Subscription, Agent, Document, User
 
 class UsageMeteringService:
     PLAN_LIMITS = {
-        "FREE": {"max_agents": 1, "max_properties": 1, "max_conversations": 100, "max_documents": 5, "monthly_price": 0.0, "voice_enabled": False},
-        "STARTER": {"max_agents": 2, "max_properties": 1, "max_conversations": 1000, "max_documents": 10, "monthly_price": 49.0, "voice_enabled": False},
-        "PROFESSIONAL": {"max_agents": 5, "max_properties": 2, "max_conversations": 10000, "max_documents": 50, "monthly_price": 199.0, "voice_enabled": True},
-        "BUSINESS": {"max_agents": 15, "max_properties": 5, "max_conversations": 50000, "max_documents": 200, "monthly_price": 499.0, "voice_enabled": True},
-        "ENTERPRISE": {"max_agents": 999, "max_properties": 999, "max_conversations": 9999999, "max_documents": 5000, "monthly_price": 1999.0, "voice_enabled": True}
+        "FREE": {"max_agents": 1, "max_properties": 1, "max_conversations": 100, "max_documents": 5, "max_seats": 1, "monthly_price": 0.0, "voice_enabled": False},
+        "STARTER": {"max_agents": 2, "max_properties": 1, "max_conversations": 1000, "max_documents": 10, "max_seats": 2, "monthly_price": 49.0, "voice_enabled": False},
+        "PROFESSIONAL": {"max_agents": 5, "max_properties": 2, "max_conversations": 10000, "max_documents": 50, "max_seats": 5, "monthly_price": 199.0, "voice_enabled": True},
+        "BUSINESS": {"max_agents": 15, "max_properties": 5, "max_conversations": 50000, "max_documents": 200, "max_seats": 20, "monthly_price": 499.0, "voice_enabled": True},
+        "ENTERPRISE": {"max_agents": 999, "max_properties": 999, "max_conversations": 9999999, "max_documents": 5000, "max_seats": 9999, "monthly_price": 1999.0, "voice_enabled": True}
     }
 
     MODEL_PRICING = {
@@ -209,7 +209,8 @@ class UsageMeteringService:
             "max_agents": default_limits["max_agents"],
             "max_properties": default_limits["max_properties"],
             "max_conversations_per_month": default_limits["max_conversations"],
-            "max_documents": default_limits.get("max_documents", 10)
+            "max_documents": default_limits.get("max_documents", 10),
+            "max_seats": default_limits.get("max_seats", 2)
         }
 
         if session:
@@ -243,7 +244,8 @@ class UsageMeteringService:
                     "max_agents": sub_obj.max_agents,
                     "max_properties": sub_obj.max_properties,
                     "max_conversations_per_month": sub_obj.max_conversations_per_month,
-                    "max_documents": self.PLAN_LIMITS.get(sub_obj.plan_name.upper(), default_limits).get("max_documents", 10)
+                    "max_documents": self.PLAN_LIMITS.get(sub_obj.plan_name.upper(), default_limits).get("max_documents", 10),
+                    "max_seats": self.PLAN_LIMITS.get(sub_obj.plan_name.upper(), default_limits).get("max_seats", 2)
                 }
                 if is_local:
                     await session.close()
@@ -326,6 +328,18 @@ class UsageMeteringService:
                 if current_usage >= max_allowed:
                     return False, f"Document upload storage limit reached ({current_usage}/{max_allowed} documents) for plan '{plan_name}'", {"current": current_usage, "limit": max_allowed, "plan": plan_name}
 
+            elif resource in ["team_member_invite", "invite_user", "seats", "team_member"]:
+                max_allowed = limits.get("max_seats", 2)
+                if session:
+                    stmt = select(func.count(User.id)).where(User.organization_id == organization_id)
+                    res = await session.execute(stmt)
+                    current_usage = res.scalar() or 0
+                else:
+                    current_usage = 1
+
+                if current_usage >= max_allowed:
+                    return False, f"Team member seat limit reached ({current_usage}/{max_allowed} seats) for plan '{plan_name}'. Please upgrade your plan.", {"current": current_usage, "limit": max_allowed, "plan": plan_name}
+
         finally:
             if is_local and session:
                 await session.close()
@@ -398,6 +412,7 @@ class UsageMeteringService:
             "max_properties": limits["max_properties"],
             "max_conversations_per_month": limits["max_conversations"],
             "max_documents": limits.get("max_documents", 10),
+            "max_seats": limits.get("max_seats", 2),
             "message": f"Subscription plan successfully updated to {clean_plan}."
         }
 

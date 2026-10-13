@@ -346,10 +346,20 @@ async def agent_chat(request: Request, agent_id: str, req: AgentChatRequest, db:
     )
 
     # 5. Check if staff handoff was requested
-    tools_executed = result.get("tools_executed", [])
-    if "handoff_to_human" in tools_executed or result.get("handoff_requested"):
+    tools_executed = result.get("tools_executed") or [
+        tc.get("tool") or tc.get("name") for tc in result.get("tool_calls", []) if isinstance(tc, dict)
+    ]
+    tools_called = result.get("debug_trace", {}).get("tools_called", [])
+    if (
+        "handoff_to_human" in tools_executed
+        or "handoff_to_human" in tools_called
+        or result.get("handoff_requested")
+        or result.get("status") in ["HUMAN_REQUESTED", "HUMAN_STAFF_TAKEN_OVER"]
+    ):
         conv.is_human_takeover = True
         conv.status = ConversationStatus.HUMAN_STAFF_TAKEN_OVER
+        result["status"] = "HUMAN_STAFF_TAKEN_OVER"
+        result["is_human_takeover"] = True
         ticket = SupportTicket(
             id=str(uuid.uuid4()),
             conversation_id=conv.id,

@@ -69,10 +69,12 @@ def test_stripe_webhook_verified_signature_and_idempotency(client):
     """0.1 Stripe: Webhook with valid signature processes correctly and rejects duplicates."""
     import json
     import stripe
+    import uuid
     from apps.api.config import settings
 
+    evt_id = f"evt_test_valid_{uuid.uuid4().hex[:8]}"
     payload_dict = {
-        "id": "evt_test_valid_001",
+        "id": evt_id,
         "type": "checkout.session.completed",
         "data": {
             "object": {
@@ -114,10 +116,12 @@ def test_stripe_webhook_payment_failed_dunning(client):
     """0.1 Stripe: invoice.payment_failed marks subscription past_due with dunning attempt."""
     import json
     import stripe
+    import uuid
     from apps.api.config import settings
 
+    evt_dunning_id = f"evt_test_dunning_{uuid.uuid4().hex[:8]}"
     payload_dict = {
-        "id": "evt_test_dunning_001",
+        "id": evt_dunning_id,
         "type": "invoice.payment_failed",
         "data": {
             "object": {

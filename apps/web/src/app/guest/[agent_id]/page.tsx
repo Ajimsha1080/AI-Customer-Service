@@ -137,7 +137,9 @@ const PLACEHOLDERS: Record<string, string> = {
   Kannada: 'ನಿಮ್ಮ ಹಾಸ್ಟೆಲ್ ಬಗ್ಗೆ ಕೇಳಿ...'
 };
 
-export default function ResidentHostelAssistantPage() {
+export default function ResidentHostelAssistantPage({ params }: { params?: { agent_id?: string } }) {
+  const agentId = params?.agent_id || 'agt_hostel_01';
+  const [conversationId, setConversationId] = useState<string | null>(null);
   const [mode, setMode] = useState<'chat' | 'voice'>('chat');
   const [voiceState, setVoiceState] = useState<'idle' | 'listening' | 'thinking' | 'speaking'>('idle');
   const [language, setLanguage] = useState('English');
@@ -185,7 +187,7 @@ export default function ResidentHostelAssistantPage() {
   };
 
   const getApiEndpoint = () => {
-    return `${API_BASE}/api/v1/agents/agt_hostel_01/chat`;
+    return `${API_BASE}/api/v1/agents/${agentId}/chat`;
   };
 
   const sendVoiceMessage = async (queryText: string): Promise<string | null> => {
@@ -199,10 +201,14 @@ export default function ResidentHostelAssistantPage() {
           property_id: 'prop_azure_palm_resort',
           message: activeLang !== 'English' ? `[Language: ${activeLang}] ${queryText}` : queryText,
           channel: 'voice_session',
-          language: activeLang
+          language: activeLang,
+          conversation_id: conversationId || undefined
         })
       });
       const data = await res.json();
+      if (data.conversation_id) {
+        setConversationId(data.conversation_id);
+      }
       setMessages(prev => [...prev, { sender: 'user', text: queryText }, { sender: 'agent', text: data.response }]);
       return data.response;
     } catch (e) {
@@ -347,12 +353,16 @@ export default function ResidentHostelAssistantPage() {
           property_id: 'prop_azure_palm_resort',
           message: activeLang !== 'English' ? `[Language: ${activeLang}] ${msgToSend}` : msgToSend,
           channel: 'web_widget',
-          language: activeLang
+          language: activeLang,
+          conversation_id: conversationId || undefined
         })
       });
 
       if (res.ok) {
         const data = await res.json();
+        if (data.conversation_id) {
+          setConversationId(data.conversation_id);
+        }
         setMessages(prev => [...prev, { sender: 'agent', text: data.response }]);
       } else {
         const fb = FALLBACK_RESPONSES[activeLang] || FALLBACK_RESPONSES.English;

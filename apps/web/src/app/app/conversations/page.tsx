@@ -1,10 +1,11 @@
 'use client';
 import React, { useState, useEffect } from 'react';
 import { MessageSquare, User, Bot, CheckCircle2, AlertCircle, PhoneCall, Send, ShieldAlert, Tag, UserCheck } from 'lucide-react';
-import { API_BASE } from '@/lib/api';
+import { API_BASE, authFetch } from '@/lib/api';
 
 export default function AppConversationsInboxPage() {
   const [conversations, setConversations] = useState<any[]>([]);
+  const [messages, setMessages] = useState<any[]>([]);
   const [selectedConv, setSelectedConv] = useState<string>('');
   const [isHumanTakeover, setIsHumanTakeover] = useState(false);
   const [chatInput, setChatInput] = useState('');
@@ -12,27 +13,18 @@ export default function AppConversationsInboxPage() {
 
   useEffect(() => {
     async function loadConversations() {
-      const defaultConvs = [
-        { id: 'conv_01', guest: 'Rahul Sharma', agent_id: 'agt_concierge_01', status: 'AI_ACTIVE', time: '10 mins ago', room: 'Suite 402', channel: 'web_widget' },
-        { id: 'conv_02', guest: 'Ananya Verma', agent_id: 'agt_concierge_01', status: 'HUMAN_REQUESTED', time: '25 mins ago', room: 'Villa 108', channel: 'whatsapp' },
-        { id: 'conv_03', guest: 'David Miller', agent_id: 'agt_booking_02', status: 'COMPLETED', time: '1 hour ago', room: 'Cottage 12', channel: 'web_widget' }
-      ];
       try {
-        const res = await fetch(`${API_BASE}/api/v1/conversations?organization_id=org_azure_group`);
+        const res = await authFetch(`${API_BASE}/api/v1/conversations`);
         if (res.ok) {
           const data = await res.json();
           if (Array.isArray(data) && data.length > 0) {
             setConversations(data);
             setSelectedConv(data[0].id);
-          } else {
-            setConversations(defaultConvs);
-            setSelectedConv(defaultConvs[0].id);
+            setIsHumanTakeover(data[0].status === 'HUMAN_STAFF_TAKEN_OVER' || data[0].is_human_takeover);
           }
         }
       } catch (err) {
         console.error("Error loading conversations:", err);
-        setConversations(defaultConvs);
-        setSelectedConv(defaultConvs[0].id);
       } finally {
         setLoading(false);
       }
@@ -40,27 +32,58 @@ export default function AppConversationsInboxPage() {
     loadConversations();
   }, []);
 
+  useEffect(() => {
+    if (!selectedConv) return;
+    async function loadMessages() {
+      try {
+        const res = await authFetch(`${API_BASE}/api/v1/conversations/${selectedConv}/messages`);
+        if (res.ok) {
+          const data = await res.json();
+          setMessages(Array.isArray(data) ? data : []);
+        }
+      } catch (err) {
+        console.error("Error loading messages:", err);
+      }
+    }
+    loadMessages();
+  }, [selectedConv]);
+
   const activeConv = conversations.find(c => c.id === selectedConv) || (conversations.length > 0 ? conversations[0] : null);
 
   const handleTakeover = async () => {
     if (!activeConv) return;
     try {
-      const res = await fetch(`${API_BASE}/api/v1/conversations/${activeConv.id}/takeover`, {
+      const res = await authFetch(`${API_BASE}/api/v1/conversations/${activeConv.id}/takeover`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ staff_user_id: 'usr_frontdesk_staff', reason: 'Staff Takeover' })
+        body: JSON.stringify({ reason: 'Staff Takeover' })
       });
       if (res.ok) {
         setIsHumanTakeover(true);
+        setConversations(prev => prev.map(c => c.id === activeConv.id ? { ...c, status: 'HUMAN_STAFF_TAKEN_OVER', is_human_takeover: true } : c));
       }
     } catch (err) {
       console.error("Error executing human takeover:", err);
     }
   };
 
-  const handleSendMessage = () => {
-    if (!chatInput.trim()) return;
+  const handleSendMessage = async () => {
+    if (!chatInput.trim() || !activeConv) return;
+    const text = chatInput;
     setChatInput('');
+    try {
+      const res = await authFetch(`${API_BASE}/api/v1/conversations/${activeConv.id}/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: text })
+      });
+      if (res.ok) {
+        const newMsg = await res.json();
+        setMessages(prev => [...prev, newMsg]);
+      }
+    } catch (err) {
+      console.error("Error sending staff message:", err);
+    }
   };
 
   return (
@@ -85,7 +108,7 @@ export default function AppConversationsInboxPage() {
                 key={c.id}
                 onClick={() => {
                   setSelectedConv(c.id);
-                  setIsHumanTakeover(c.status === 'HUMAN_STAFF_TAKEN_OVER');
+                  setIsHumanTakeover(c.status === 'HUMAN_STAFF_TAKEN_OVER' || c.is_human_takeover);
                 }}
                 className={`p-4 cursor-pointer transition-all ${
                   selectedConv === c.id ? 'bg-zinc-100 border-l-4 border-zinc-900' : 'hover:bg-zinc-50'
@@ -122,7 +145,7 @@ export default function AppConversationsInboxPage() {
                 </div>
                 <div>
                   <h3 className="font-bold text-sm text-zinc-900">{activeConv.guest || 'Valued Guest'}</h3>
-                  <p className="text-[10px] text-zinc-500 font-medium">{activeConv.id} • Azure Palm Resort</p>
+                  <p className="text-[10px] text-zinc-500 font-medium">{activeConv.id}</p>
                 </div>
               </div>
 
@@ -141,17 +164,30 @@ export default function AppConversationsInboxPage() {
 
             {/* Messages */}
             <div className="flex-1 p-6 space-y-4 overflow-y-auto bg-zinc-50/50">
-              <div className="flex justify-start">
-                <div className="bg-white border border-zinc-200 text-zinc-800 p-4 rounded-2xl text-xs max-w-[80%] shadow-xs">
-                  {activeConv.last_message || "Hello! Is the infinity swimming pool open until 8 PM tonight?"}
-                </div>
-              </div>
-
-              <div className="flex justify-end">
-                <div className="bg-zinc-900 text-white p-4 rounded-2xl text-xs font-medium max-w-[80%] shadow-xs">
-                  Good evening! Yes, our temperature-controlled Infinity Pool is open until 8:00 PM today.
-                </div>
-              </div>
+              {messages.length === 0 ? (
+                <div className="text-center text-xs text-zinc-400 py-8">No messages in this conversation yet.</div>
+              ) : (
+                messages.map((m: any) => {
+                  const isStaff = m.sender_type === 'STAFF';
+                  const isAgent = m.sender_type === 'agent' || m.sender_type === 'ai';
+                  return (
+                    <div key={m.id} className={`flex ${isStaff ? 'justify-end' : 'justify-start'}`}>
+                      <div className={`p-4 rounded-2xl text-xs max-w-[80%] shadow-xs ${
+                        isStaff 
+                          ? 'bg-amber-600 text-white font-medium' 
+                          : isAgent 
+                            ? 'bg-zinc-900 text-white font-medium' 
+                            : 'bg-white border border-zinc-200 text-zinc-800'
+                      }`}>
+                        <div className="text-[10px] opacity-75 font-mono mb-1">
+                          {isStaff ? 'Staff Member' : isAgent ? 'AI Concierge' : (activeConv.guest || 'Guest')}
+                        </div>
+                        {m.content}
+                      </div>
+                    </div>
+                  );
+                })
+              )}
             </div>
 
             {/* Input Bar */}

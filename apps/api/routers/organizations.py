@@ -18,6 +18,7 @@ from apps.api.auth import (
     ROLE_HIERARCHY
 )
 from services.database.audit import record_audit_log_async
+from services.billing.metering import SaaSMeteringService
 
 router = APIRouter(prefix="/api/v1", tags=["Organizations & Properties"])
 
@@ -110,6 +111,14 @@ async def create_invitation(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"User with email {req.email} is already registered."
+        )
+
+    # Billing quota check: team member seats
+    allowed, quota_reason, _ = await SaaSMeteringService().check_billing_quota(org_id, resource="team_member_invite", db=db)
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail=f"Billing quota exceeded: {quota_reason}"
         )
 
     inv_token = secrets.token_urlsafe(32)
