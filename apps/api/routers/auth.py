@@ -11,16 +11,19 @@ import httpx
 
 from apps.api.config import settings
 from services.database.session import get_db
-from services.database.models import User, Organization, UserRole, Invitation
+from services.database.models import User, Organization, UserRole, Invitation, SSOConfig
 from services.database.audit import record_audit_log_async
 from apps.api.auth import (
     hash_password, verify_password,
     create_access_token, create_refresh_token,
     decode_refresh_token_async, revoke_refresh_token,
     get_current_user, generate_oauth_state, verify_oauth_state,
-    check_login_lockout, record_failed_login, reset_login_failures
+    check_login_lockout, record_failed_login, reset_login_failures,
+    create_user_session
 )
 from services.security.limiter import limiter
+from services.security.password_policy import validate_password_policy
+from services.security.email_service import email_service
 
 router = APIRouter(prefix="/api/v1/auth", tags=["Auth"])
 
@@ -93,6 +96,7 @@ async def register(request: Request, req: RegisterRequest, response: Response, d
     """Registers a new tenant. ALWAYS provisions a brand-new Organization with a server-generated slug.
     The creator is designated as the tenant OWNER.
     """
+    validate_password_policy(req.password)
     stmt = select(User).where(User.email == req.email)
     res = await db.execute(stmt)
     if res.scalar_one_or_none():
@@ -124,7 +128,8 @@ async def register(request: Request, req: RegisterRequest, response: Response, d
         hashed_password=hash_password(req.password),
         full_name=req.full_name,
         role=UserRole.OWNER,
-        is_active=True
+        is_active=True,
+        email_verified=False
     )
     db.add(user)
     await db.flush()
@@ -141,6 +146,17 @@ async def register(request: Request, req: RegisterRequest, response: Response, d
 
     access_token = create_access_token({"sub": user.id, "org_id": user.organization_id, "role": user.role.value if hasattr(user.role, "value") else str(user.role)})
     refresh_token = create_refresh_token({"sub": user.id})
+
+    client_ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip() or (request.client.host if request.client else None)
+    user_agent = request.headers.get("User-Agent")
+    await create_user_session(
+        db=db,
+        user_id=user.id,
+        org_id=user.organization_id,
+        access_token=access_token,
+        ip_address=client_ip,
+        user_agent=user_agent
+    )
 
     set_auth_cookies(response, access_token, refresh_token)
 
@@ -195,6 +211,7 @@ async def accept_invitation(req: AcceptInvitationRequest, response: Response, db
             detail=f"User with email {inv.email} already exists."
         )
 
+    validate_password_policy(req.password)
     assigned_role = UserRole(inv.role) if inv.role in UserRole.__members__ else UserRole.STAFF
     user_id = str(uuid.uuid4())
     user = User(
@@ -204,7 +221,8 @@ async def accept_invitation(req: AcceptInvitationRequest, response: Response, db
         hashed_password=hash_password(req.password),
         full_name=req.full_name,
         role=assigned_role,
-        is_active=True
+        is_active=True,
+        email_verified=True
     )
     db.add(user)
     inv.accepted_at = now
@@ -257,6 +275,36 @@ async def login(request: Request, req: LoginRequest, response: Response, db: Asy
             detail="User account is deactivated"
         )
 
+    # Check Organization-Enforced SSO Policy
+    if user.organization_id:
+        stmt_sso = select(SSOConfig).where(SSOConfig.organization_id == user.organization_id)
+        res_sso = await db.execute(stmt_sso)
+        sso_cfg = res_sso.scalar_one_or_none()
+        if sso_cfg and sso_cfg.enforce_sso:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="SSO_REQUIRED: Password login is disabled for your organization. Please log in using SSO."
+            )
+
+    # Multi-Factor Authentication Challenge
+    mfa_required = bool(user.mfa_enabled)
+    if not mfa_required and user.organization_id:
+        stmt_org = select(Organization).where(Organization.id == user.organization_id)
+        res_org = await db.execute(stmt_org)
+        org = res_org.scalar_one_or_none()
+        if org and org.mfa_enforced:
+            mfa_required = True
+
+    if mfa_required:
+        from apps.api.routers.mfa import generate_mfa_ticket
+        ticket = generate_mfa_ticket(user.id)
+        return {
+            "mfa_required": True,
+            "mfa_ticket": ticket,
+            "user_id": user.id,
+            "message": "Multi-factor authentication required. Please verify with your authenticator code or recovery code."
+        }
+
     reset_login_failures(req.email)
 
     await record_audit_log_async(
@@ -271,6 +319,17 @@ async def login(request: Request, req: LoginRequest, response: Response, db: Asy
 
     access_token = create_access_token({"sub": user.id, "org_id": user.organization_id, "role": user.role.value if hasattr(user.role, "value") else str(user.role)})
     refresh_token = create_refresh_token({"sub": user.id})
+
+    client_ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip() or (request.client.host if request.client else None)
+    user_agent = request.headers.get("User-Agent")
+    await create_user_session(
+        db=db,
+        user_id=user.id,
+        org_id=user.organization_id,
+        access_token=access_token,
+        ip_address=client_ip,
+        user_agent=user_agent
+    )
 
     set_auth_cookies(response, access_token, refresh_token)
 
@@ -456,7 +515,15 @@ async def forgot_password(request: Request, req: ForgotPasswordRequest, db: Asyn
             {"sub": user.id, "email": user.email, "scope": "password_reset"},
             expires_delta=timedelta(hours=1)
         )
-        logger.info(f"Password reset token issued for user {user.email}")
+        await email_service.send_email(
+            to_email=user.email,
+            subject="Security Notice: Reset Your Password",
+            template_name="password_reset",
+            template_context={
+                "name": user.full_name,
+                "reset_url": f"http://localhost:3002/reset-password?token={reset_token}"
+            }
+        )
 
     return {
         "message": "If this email exists in our system, a password reset link has been dispatched.",
@@ -468,6 +535,7 @@ async def forgot_password(request: Request, req: ForgotPasswordRequest, db: Asyn
 async def reset_password(request: Request, req: ResetPasswordRequest, db: AsyncSession = Depends(get_db)):
     """Validates reset token and updates account password with Argon2 hash."""
     from jose import jwt, JWTError
+    validate_password_policy(req.new_password)
     try:
         payload = jwt.decode(req.token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
         if payload.get("scope") != "password_reset":
@@ -514,5 +582,6 @@ async def verify_email(req: VerifyEmailRequest, db: AsyncSession = Depends(get_d
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
     user.is_active = True
+    user.email_verified = True
     await db.flush()
     return {"message": "Email address verified successfully. You may now log in."}

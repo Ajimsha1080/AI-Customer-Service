@@ -168,11 +168,84 @@ TASK_REGISTRY = {
 }
 
 
+QUEUE_KEY = "hac:task_queue"
+DLQ_KEY = "hac:task_queue:dlq"
+
+# In-memory DLQ store for testing / local fallback: job_id -> envelope
+LOCAL_DLQ: Dict[str, Dict[str, Any]] = {}
+PROCESSED_JOB_KEYS: set = set()
+
+async def push_to_dlq(envelope: Dict[str, Any], error_reason: str):
+    """Pushes a permanently failed job to the Dead-Letter Queue."""
+    envelope["failed_at"] = datetime.now(timezone.utc).isoformat()
+    envelope["error"] = error_reason
+    envelope["status"] = "DEAD_LETTER"
+
+    job_id = envelope.get("id")
+    LOCAL_DLQ[job_id] = envelope
+
+    try:
+        import redis.asyncio as aioredis
+        client = aioredis.from_url(settings.REDIS_URL, socket_connect_timeout=0.5, decode_responses=True)
+        await client.lpush(DLQ_KEY, json.dumps(envelope))
+        await client.close()
+        logger.error(f"[TaskWorker] Job '{job_id}' ({envelope.get('task_name')}) moved to Redis DLQ: {error_reason}")
+    except Exception:
+        logger.error(f"[TaskWorker] Job '{job_id}' ({envelope.get('task_name')}) moved to Local DLQ: {error_reason}")
+
+async def list_dlq_jobs(limit: int = 50) -> list[Dict[str, Any]]:
+    """Inspects pending dead-letter jobs."""
+    try:
+        import redis.asyncio as aioredis
+        client = aioredis.from_url(settings.REDIS_URL, socket_connect_timeout=0.5, decode_responses=True)
+        raw_items = await client.lrange(DLQ_KEY, 0, limit - 1)
+        await client.close()
+        if raw_items:
+            return [json.loads(item) for item in raw_items]
+    except Exception:
+        pass
+    return list(LOCAL_DLQ.values())[:limit]
+
+async def replay_dlq_job(job_id: str) -> Optional[Dict[str, Any]]:
+    """Replays a job from the DLQ by re-enqueueing it into the primary queue."""
+    target_envelope = None
+    if job_id in LOCAL_DLQ:
+        target_envelope = LOCAL_DLQ.pop(job_id)
+
+    try:
+        import redis.asyncio as aioredis
+        client = aioredis.from_url(settings.REDIS_URL, socket_connect_timeout=0.5, decode_responses=True)
+        raw_items = await client.lrange(DLQ_KEY, 0, -1)
+        for raw in raw_items:
+            parsed = json.loads(raw)
+            if parsed.get("id") == job_id:
+                target_envelope = parsed
+                await client.lrem(DLQ_KEY, 1, raw)
+                break
+        await client.close()
+    except Exception:
+        pass
+
+    if not target_envelope:
+        return None
+
+    # Reset retries and re-enqueue
+    task_name = target_envelope.get("task_name")
+    payload = target_envelope.get("payload", {})
+    new_task_id = await enqueue_task(task_name=task_name, payload=payload, max_retries=3)
+    logger.info(f"[TaskWorker] Replayed dead letter job '{job_id}' as new task '{new_task_id}'.")
+    return {"replayed_job_id": job_id, "new_task_id": new_task_id, "task_name": task_name}
+
 # --- TASK ENQUEUEING ENGINE ---
 
-async def enqueue_task(task_name: str, payload: Dict[str, Any], max_retries: int = 3) -> str:
+async def enqueue_task(task_name: str, payload: Dict[str, Any], max_retries: int = 3, idempotency_key: Optional[str] = None) -> str:
     """Enqueues a task for asynchronous processing via Redis queue with fallback to background task."""
-    task_id = f"task_{uuid.uuid4().hex[:12]}"
+    task_id = idempotency_key or f"task_{uuid.uuid4().hex[:12]}"
+
+    if task_id in PROCESSED_JOB_KEYS:
+        logger.info(f"[TaskQueue] Job with idempotency key '{task_id}' already processed, skipping.")
+        return task_id
+
     task_envelope = {
         "id": task_id,
         "task_name": task_name,
@@ -195,21 +268,26 @@ async def enqueue_task(task_name: str, payload: Dict[str, Any], max_retries: int
     if not enqueued:
         fn = TASK_REGISTRY.get(task_name)
         if fn:
-            asyncio.create_task(_execute_with_retries(fn, task_name, payload, max_retries))
+            asyncio.create_task(_execute_with_retries(fn, task_name, task_envelope, max_retries))
 
     return task_id
 
 
-async def _execute_with_retries(fn, task_name: str, payload: Dict[str, Any], retries: int):
+async def _execute_with_retries(fn, task_name: str, envelope: Dict[str, Any], retries: int):
+    payload = envelope.get("payload", {})
+    job_id = envelope.get("id")
     for attempt in range(1, retries + 1):
         try:
-            return await fn(payload)
+            res = await fn(payload)
+            PROCESSED_JOB_KEYS.add(job_id)
+            return res
         except Exception as e:
             logger.warning(f"[TaskWorker] Task '{task_name}' attempt {attempt}/{retries} failed: {e}")
             if attempt < retries:
-                await asyncio.sleep(2.0 ** attempt)
+                await asyncio.sleep(0.05 * (2 ** attempt))
             else:
-                logger.error(f"[TaskWorker] Task '{task_name}' failed permanently.")
+                await push_to_dlq(envelope, str(e))
+                logger.error(f"[TaskWorker] Task '{task_name}' failed permanently. Moved to DLQ.")
 
 
 # --- STANDALONE WORKER PROCESS ---
@@ -231,6 +309,11 @@ async def run_worker():
                 _, raw_data = item
                 try:
                     envelope = json.loads(raw_data)
+                    job_id = envelope.get("id")
+                    if job_id in PROCESSED_JOB_KEYS:
+                        logger.info(f"[TaskWorker] Skipping duplicate job '{job_id}'.")
+                        continue
+
                     task_name = envelope.get("task_name")
                     payload = envelope.get("payload", {})
                     retries_left = envelope.get("retries_left", 3)
@@ -242,12 +325,15 @@ async def run_worker():
 
                     try:
                         await fn(payload)
+                        PROCESSED_JOB_KEYS.add(job_id)
                     except Exception as exec_err:
                         logger.warning(f"Error executing task '{task_name}': {exec_err}")
                         if retries_left > 1:
                             envelope["retries_left"] = retries_left - 1
                             await client.lpush(QUEUE_KEY, json.dumps(envelope))
                             logger.info(f"Re-enqueued '{task_name}' with {retries_left - 1} retries left.")
+                        else:
+                            await push_to_dlq(envelope, str(exec_err))
                 except Exception as parse_err:
                     logger.error(f"Failed to process worker queue item: {parse_err}")
         except Exception as conn_err:

@@ -64,6 +64,11 @@ class Organization(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     slug: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
     status: Mapped[str] = mapped_column(String(50), default="active")
+    mfa_enforced: Mapped[bool] = mapped_column(Boolean, default=False)
+    ip_allowlist: Mapped[Optional[list]] = mapped_column(JSON, default=list, nullable=True)
+    support_access_granted_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    support_access_granted_by: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    data_residency_region: Mapped[str] = mapped_column(String(20), default="US")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=get_utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=get_utc_now, onupdate=get_utc_now)
 
@@ -103,7 +108,14 @@ class User(Base):
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
     full_name: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[UserRole] = mapped_column(SQLEnum(UserRole), default=UserRole.ORGANIZATION_ADMIN)
+    custom_role_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    mfa_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    mfa_secret: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    mfa_recovery_codes: Mapped[Optional[list]] = mapped_column(JSON, default=list, nullable=True)
+    failed_login_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    locked_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    email_verified: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=get_utc_now)
 
     organization = relationship("Organization", back_populates="users")
@@ -497,6 +509,8 @@ class AuditLog(Base):
     target_type: Mapped[str] = mapped_column(String(50), nullable=False)
     target_id: Mapped[str] = mapped_column(String(36), nullable=False)
     details_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    prev_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=get_utc_now)
 
 class RevokedToken(Base):
@@ -505,4 +519,100 @@ class RevokedToken(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
     token: Mapped[str] = mapped_column(Text, unique=True, nullable=False, index=True)
     revoked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=get_utc_now)
+
+class SSOConfig(Base):
+    __tablename__ = "sso_configs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
+    organization_id: Mapped[str] = mapped_column(String(36), ForeignKey("organizations.id", ondelete="CASCADE"), unique=True, nullable=False, index=True)
+    provider_type: Mapped[str] = mapped_column(String(20), default="SAML")
+    idp_metadata_url: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    idp_entity_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    idp_sso_url: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    idp_x509_cert: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    client_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    client_secret_encrypted: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    enforce_sso: Mapped[bool] = mapped_column(Boolean, default=False)
+    jit_provisioning_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    default_role: Mapped[str] = mapped_column(String(50), default="STAFF")
+    domains: Mapped[list] = mapped_column(JSON, default=list)
+    domain_verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    verification_token: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=get_utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=get_utc_now, onupdate=get_utc_now)
+
+class SCIMToken(Base):
+    __tablename__ = "scim_tokens"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
+    organization_id: Mapped[str] = mapped_column(String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(100), default="SCIM Directory Token")
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=get_utc_now)
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+class UserSession(Base):
+    __tablename__ = "user_sessions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    organization_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    session_token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    device_name: Mapped[str] = mapped_column(String(255), default="Desktop Browser")
+    ip_address: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    user_agent: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    last_activity_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=get_utc_now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    is_revoked: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=get_utc_now)
+
+class CustomRole(Base):
+    __tablename__ = "custom_roles"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
+    organization_id: Mapped[str] = mapped_column(String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    permissions: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=get_utc_now)
+
+class WebhookSubscription(Base):
+    __tablename__ = "webhook_subscriptions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
+    organization_id: Mapped[str] = mapped_column(String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    endpoint_url: Mapped[str] = mapped_column(String(512), nullable=False)
+    secret_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    events: Mapped[list] = mapped_column(JSON, default=list)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=get_utc_now)
+
+class WebhookDeliveryLog(Base):
+    __tablename__ = "webhook_delivery_logs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
+    subscription_id: Mapped[str] = mapped_column(String(36), ForeignKey("webhook_subscriptions.id", ondelete="CASCADE"), nullable=False, index=True)
+    organization_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    event_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    payload_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    status_code: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    response_body: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=1)
+    success: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=get_utc_now)
+
+class ApiKey(Base):
+    __tablename__ = "api_keys"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
+    organization_id: Mapped[str] = mapped_column(String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    key_prefix: Mapped[str] = mapped_column(String(16), nullable=False)
+    key_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    scopes: Mapped[list] = mapped_column(JSON, default=list)
+    rate_limit_per_minute: Mapped[int] = mapped_column(Integer, default=60)
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=get_utc_now)
 

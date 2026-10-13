@@ -26,9 +26,12 @@ async def prepare_db():
         res_org = await db.execute(select(Organization).where(Organization.id == "org_azure_group"))
         org = res_org.scalar_one_or_none()
         if not org:
-            org = Organization(id="org_azure_group", name="Azure Palm Hostel", slug="azure-palm-hostel")
+            org = Organization(id="org_azure_group", name="Azure Palm Hostel", slug="azure-palm-hostel", mfa_enforced=False, status="active")
             db.add(org)
             await db.flush()
+        else:
+            org.mfa_enforced = False
+            org.status = "active"
 
         res_prop = await db.execute(select(Property).where(Property.id == "prop_azure_palm_resort"))
         prop = res_prop.scalar_one_or_none()
@@ -95,7 +98,8 @@ async def prepare_db():
 
         for u_id, email, role, pwd in users_to_seed:
             res_u = await db.execute(select(User).where(User.id == u_id))
-            if not res_u.scalar_one_or_none():
+            u_obj = res_u.scalar_one_or_none()
+            if not u_obj:
                 u_obj = User(
                     id=u_id,
                     organization_id=org.id,
@@ -103,7 +107,21 @@ async def prepare_db():
                     hashed_password=hash_password(pwd),
                     full_name=email.split("@")[0].title(),
                     role=role,
-                    is_active=True
+                    is_active=True,
+                    mfa_enabled=False
                 )
                 db.add(u_obj)
+            else:
+                u_obj.mfa_enabled = False
+                u_obj.is_active = True
+                u_obj.locked_until = None
+                u_obj.failed_login_attempts = 0
         await db.commit()
+
+@pytest_asyncio.fixture
+async def db_session():
+    """Provides an isolated database session for tests."""
+    async with AsyncSessionLocal() as session:
+        yield session
+        await session.rollback()
+

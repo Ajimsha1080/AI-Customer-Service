@@ -68,6 +68,15 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 from slowapi.middleware import SlowAPIMiddleware
 app.add_middleware(SlowAPIMiddleware)
 
+from apps.api.middleware.idempotency import IdempotencyMiddleware
+app.add_middleware(IdempotencyMiddleware)
+
+from services.operations.metrics import PrometheusMetricsMiddleware
+app.add_middleware(PrometheusMetricsMiddleware)
+
+from apps.api.middleware.security_headers import SecurityHeadersMiddleware
+app.add_middleware(SecurityHeadersMiddleware)
+
 # --- CORS MIDDLEWARE HARDENING ---
 app.add_middleware(
     CORSMiddleware,
@@ -94,6 +103,8 @@ async def request_id_and_logging_middleware(request: Request, call_next):
     latency_ms = round((time.time() - start_time) * 1000, 2)
 
     response.headers["X-Request-ID"] = request_id
+    if getattr(request.state, "is_support_impersonation", False):
+        response.headers["X-Support-Impersonation"] = "Active"
 
     log_entry = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -143,13 +154,21 @@ async def global_exception_handler(request: Request, exc: Exception):
         }
     )
 
-# --- INCLUDE ROUTERS ---
 from apps.api.routers import (
-    health, auth, agents, voice, billing, integrations, platform, conversations, organizations, hospitality_crud
+    health, auth, agents, voice, billing, integrations, platform, conversations,
+    organizations, hospitality_crud, mfa, sessions, sso, scim, custom_roles, gdpr,
+    developer
 )
 
 app.include_router(health.router)
 app.include_router(auth.router)
+app.include_router(mfa.router)
+app.include_router(sessions.router)
+app.include_router(sso.router)
+app.include_router(scim.router)
+app.include_router(custom_roles.router)
+app.include_router(gdpr.router)
+app.include_router(developer.router)
 app.include_router(organizations.router)
 app.include_router(agents.router)
 app.include_router(voice.router)
@@ -158,4 +177,5 @@ app.include_router(integrations.router)
 app.include_router(platform.router)
 app.include_router(conversations.router)
 app.include_router(hospitality_crud.router)
+
 

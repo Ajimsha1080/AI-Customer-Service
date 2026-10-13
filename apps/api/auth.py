@@ -1,17 +1,20 @@
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, status, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import ipaddress
 import secrets
+import uuid
+import hashlib
 from apps.api.config import settings
 from services.database.session import get_db, set_tenant_context
-from services.database.models import User, UserRole, RevokedToken
+from services.database.models import User, UserRole, RevokedToken, Organization, CustomRole, UserSession
 
 pwd_context = CryptContext(schemes=["argon2"], deprecated="auto")
 security_scheme = HTTPBearer(auto_error=False)
@@ -30,11 +33,12 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
         return False
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
-    """Generates a signed JWT access token with 30 minute default expiry."""
+    """Generates a signed JWT access token with unique jti and 30 minute default expiry."""
     to_encode = data.copy()
     now = datetime.now(timezone.utc)
     expire = now + (expires_delta or timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES))
     to_encode.update({
+        "jti": str(uuid.uuid4()),
         "exp": expire,
         "iat": now,
         "token_type": "access"
@@ -161,11 +165,120 @@ def decode_refresh_token(token: str) -> dict:
             detail="Could not validate refresh token credentials or token expired."
         )
 
+def is_ip_allowed(client_ip: Optional[str], allowlist_str: Optional[str]) -> bool:
+    """Validates if client IP matches an organization's configured IP allowlist."""
+    if not allowlist_str or not allowlist_str.strip():
+        return True
+    if not client_ip:
+        return True
+    
+    entries = [e.strip() for e in allowlist_str.split(",") if e.strip()]
+    if client_ip in ("testclient", "localhost", "127.0.0.1", "::1"):
+        if any(e in ("127.0.0.1", "localhost", "testclient", "::1", "127.0.0.0/8") for e in entries):
+            return True
+        # If allowlist specifies non-local IPs, local test client without allowlist entry is blocked
+        return False
+
+    try:
+        c_ip = ipaddress.ip_address(client_ip.strip())
+    except ValueError:
+        return False
+
+    for entry in entries:
+        try:
+            if "/" in entry:
+                if c_ip in ipaddress.ip_network(entry, strict=False):
+                    return True
+            else:
+                if c_ip == ipaddress.ip_address(entry):
+                    return True
+        except ValueError:
+            continue
+    return False
+
+async def create_user_session(
+    db: AsyncSession,
+    user_id: str,
+    org_id: str,
+    access_token: str,
+    ip_address: Optional[str] = None,
+    user_agent: Optional[str] = None,
+    device_name: str = "Web Client"
+) -> UserSession:
+    """Registers an active tracked enterprise session."""
+    token_hash = _hash_token(access_token)
+    session_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(hours=24)  # 24 hour absolute timeout
+    session = UserSession(
+        id=session_id,
+        user_id=user_id,
+        organization_id=org_id,
+        session_token_hash=token_hash,
+        device_name=device_name or "Web Client",
+        ip_address=ip_address,
+        user_agent=user_agent,
+        last_activity_at=now,
+        expires_at=expires_at,
+        is_revoked=False
+    )
+    db.add(session)
+    await db.flush()
+    return session
+
+async def revoke_user_session(db: AsyncSession, session_id: str, user_id: str) -> bool:
+    """Revokes a specific session remotely."""
+    stmt = select(UserSession).where(UserSession.id == session_id, UserSession.user_id == user_id)
+    res = await db.execute(stmt)
+    sess = res.scalar_one_or_none()
+    if sess:
+        sess.is_revoked = True
+        await revoke_refresh_token(sess.session_token_hash, db=db)
+        await db.flush()
+        return True
+    return False
+
+async def revoke_all_user_sessions(db: AsyncSession, user_id: str, except_token_hash: Optional[str] = None) -> int:
+    """Revokes all active sessions for a user, optionally exempting current session."""
+    stmt = select(UserSession).where(UserSession.user_id == user_id, UserSession.is_revoked == False)
+    if except_token_hash:
+        stmt = stmt.where(UserSession.session_token_hash != except_token_hash)
+    res = await db.execute(stmt)
+    sessions = res.scalars().all()
+    count = 0
+    for s in sessions:
+        s.is_revoked = True
+        await revoke_refresh_token(s.session_token_hash, db=db)
+        count += 1
+    await db.flush()
+    return count
+
+def create_impersonation_token(
+    admin_user: User,
+    target_org_id: str,
+    expires_in_minutes: int = 60
+) -> str:
+    """Issues time-boxed support impersonation token for verified customer support sessions."""
+    now = datetime.now(timezone.utc)
+    expire = now + timedelta(minutes=expires_in_minutes)
+    payload = {
+        "sub": admin_user.id,
+        "org_id": target_org_id,
+        "role": UserRole.OWNER.value,
+        "is_impersonation": True,
+        "original_user_id": admin_user.id,
+        "token_type": "access",
+        "exp": expire,
+        "iat": now
+    }
+    return jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
+
 async def get_current_user(
+    request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_scheme),
     db: AsyncSession = Depends(get_db)
 ) -> User:
-    """FastAPI dependency: verifies Bearer JWT token and returns authenticated User."""
+    """FastAPI dependency: verifies Bearer JWT token, active status, session revocation, IP allowlist, and support impersonation."""
     if not credentials or not credentials.credentials:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -173,13 +286,50 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"}
         )
     
-    payload = decode_access_token(credentials.credentials)
+    raw_token = credentials.credentials
+    token_hash = _hash_token(raw_token)
+    if raw_token in REFRESH_TOKEN_DENYLIST or token_hash in REFRESH_TOKEN_DENYLIST:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has been revoked.",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
+
+    payload = decode_access_token(raw_token)
     user_id = payload.get("sub")
     if not user_id:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid token payload. Subject missing."
         )
+
+    # Session Lifecycle & Idle Timeout Enforcement
+    stmt_sess = select(UserSession).where(UserSession.session_token_hash == token_hash)
+    res_sess = await db.execute(stmt_sess)
+    user_sess = res_sess.scalar_one_or_none()
+    if user_sess:
+        if user_sess.is_revoked:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Session has been revoked.",
+                headers={"WWW-Authenticate": "Bearer"}
+            )
+        now = datetime.now(timezone.utc)
+        exp = user_sess.expires_at.replace(tzinfo=timezone.utc) if user_sess.expires_at.tzinfo is None else user_sess.expires_at
+        if now > exp:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Session expired (absolute timeout).",
+                headers={"WWW-Authenticate": "Bearer"}
+            )
+        last_act = user_sess.last_activity_at.replace(tzinfo=timezone.utc) if user_sess.last_activity_at.tzinfo is None else user_sess.last_activity_at
+        if (now - last_act).total_seconds() > 3600:  # 60 minute idle timeout
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Session expired due to inactivity.",
+                headers={"WWW-Authenticate": "Bearer"}
+            )
+        user_sess.last_activity_at = now
 
     stmt = select(User).where(User.id == user_id)
     res = await db.execute(stmt)
@@ -197,13 +347,51 @@ async def get_current_user(
             detail="User account is deactivated."
         )
 
+    # Impersonation Verification & Audit Banner Injection
+    if payload.get("is_impersonation"):
+        target_org_id = payload.get("org_id")
+        stmt_org = select(Organization).where(Organization.id == target_org_id)
+        res_org = await db.execute(stmt_org)
+        target_org = res_org.scalar_one_or_none()
+        if not target_org or not target_org.support_access_granted_until:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Customer has not granted active support access to this organization."
+            )
+        now = datetime.now(timezone.utc)
+        supp_exp = target_org.support_access_granted_until.replace(tzinfo=timezone.utc) if target_org.support_access_granted_until.tzinfo is None else target_org.support_access_granted_until
+        if supp_exp < now:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Customer support access has expired."
+            )
+        if request:
+            request.state.is_support_impersonation = True
+
+    # IP Allowlist Enforcement per Organization
+    effective_org_id = payload.get("org_id") or user.organization_id
+    if effective_org_id:
+        stmt_org = select(Organization).where(Organization.id == effective_org_id)
+        res_org = await db.execute(stmt_org)
+        org = res_org.scalar_one_or_none()
+        if org and org.ip_allowlist:
+            client_ip = None
+            if request:
+                client_ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip() or (request.client.host if request.client else None)
+            if client_ip and not is_ip_allowed(client_ip, org.ip_allowlist):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"Access denied. IP address {client_ip} is not in the organization's allowlist."
+                )
+
     # Enterprise RLS session binding
-    if user.organization_id:
-        await set_tenant_context(db, user.organization_id)
+    if effective_org_id:
+        await set_tenant_context(db, effective_org_id)
 
     return user
 
 async def get_optional_current_user(
+    request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_scheme),
     db: AsyncSession = Depends(get_db)
 ) -> Optional[User]:
@@ -211,9 +399,73 @@ async def get_optional_current_user(
     if not credentials or not credentials.credentials:
         return None
     try:
-        return await get_current_user(credentials=credentials, db=db)
+        return await get_current_user(request=request, credentials=credentials, db=db)
     except Exception:
         return None
+
+ROLE_PERMISSIONS: Dict[str, set] = {
+    "SUPER_ADMIN": {"*"},
+    "OWNER": {
+        "org:read", "org:write", "property:read", "property:write", "agent:read", "agent:write",
+        "knowledge:read", "knowledge:write", "billing:read", "billing:write", "users:read", "users:write",
+        "audit:read", "sso:manage", "scim:manage", "support:grant_access", "conversations:read",
+        "conversations:write", "analytics:read", "roles:manage", "api_keys:manage", "webhooks:manage"
+    },
+    "ORGANIZATION_ADMIN": {
+        "org:read", "org:write", "property:read", "property:write", "agent:read", "agent:write",
+        "knowledge:read", "knowledge:write", "billing:read", "users:read", "users:write",
+        "audit:read", "sso:manage", "scim:manage", "conversations:read", "conversations:write",
+        "analytics:read", "roles:manage", "api_keys:manage", "webhooks:manage"
+    },
+    "ADMIN": {
+        "org:read", "property:read", "property:write", "agent:read", "agent:write",
+        "knowledge:read", "knowledge:write", "billing:read", "users:read", "users:write",
+        "audit:read", "conversations:read", "conversations:write", "analytics:read"
+    },
+    "PROPERTY_ADMIN": {
+        "property:read", "property:write", "agent:read", "agent:write",
+        "knowledge:read", "knowledge:write", "users:read", "conversations:read",
+        "conversations:write", "analytics:read"
+    },
+    "STAFF": {
+        "property:read", "agent:read", "knowledge:read", "conversations:read", "conversations:write"
+    },
+    "ANALYST": {
+        "property:read", "analytics:read", "audit:read", "conversations:read"
+    },
+    "VIEWER": {
+        "property:read", "knowledge:read", "conversations:read"
+    }
+}
+
+async def get_user_permissions(user: User, db: AsyncSession) -> set:
+    """Resolves granular permissions for user including custom roles."""
+    if user.role == UserRole.SUPER_ADMIN:
+        return {"*"}
+    role_key = user.role.value if hasattr(user.role, "value") else str(user.role)
+    perms = set(ROLE_PERMISSIONS.get(role_key, set()))
+    if user.custom_role_id:
+        stmt = select(CustomRole).where(CustomRole.id == user.custom_role_id)
+        res = await db.execute(stmt)
+        custom = res.scalar_one_or_none()
+        if custom and custom.permissions:
+            perms.update(custom.permissions)
+    return perms
+
+def require_permission(permission: str):
+    """Enforces fine-grained enterprise permission check."""
+    async def permission_checker(
+        current_user: User = Depends(get_current_user),
+        db: AsyncSession = Depends(get_db)
+    ) -> User:
+        user_perms = await get_user_permissions(current_user, db)
+        if "*" in user_perms or permission in user_perms:
+            return current_user
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Insufficient permissions. Required permission: {permission}."
+        )
+    return permission_checker
 
 ROLE_HIERARCHY = {
     UserRole.SUPER_ADMIN: 100,

@@ -15,7 +15,7 @@ from services.database.models import (
 )
 from apps.api.auth import (
     get_current_user, verify_tenant_access, require_role, verify_password,
-    ROLE_HIERARCHY
+    ROLE_HIERARCHY, require_permission
 )
 from services.database.audit import record_audit_log_async
 from services.billing.metering import SaaSMeteringService
@@ -447,3 +447,122 @@ async def purge_tenant_data(
         "status": "success",
         "message": f"Tenant organization {org_id} has been soft-deleted and records purged."
     }
+
+class GrantSupportAccessRequest(BaseModel):
+    duration_hours: int = 1  # 1 to 24 hours
+
+class UpdateSecurityPolicyRequest(BaseModel):
+    mfa_enforced: Optional[bool] = None
+    ip_allowlist: Optional[str] = None
+
+@router.post("/organizations/{organization_id}/support-access/grant")
+async def grant_support_access(
+    organization_id: str,
+    req: GrantSupportAccessRequest,
+    current_user: User = Depends(require_permission("support:grant_access")),
+    db: AsyncSession = Depends(get_db)
+):
+    """Enables time-boxed platform support access authorized by customer tenant admin."""
+    org_id = verify_tenant_access(current_user, organization_id)
+    if req.duration_hours < 1 or req.duration_hours > 24:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Support access duration must be between 1 and 24 hours."
+        )
+
+    stmt = select(Organization).where(Organization.id == org_id)
+    res = await db.execute(stmt)
+    org = res.scalar_one_or_none()
+    if not org:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Organization not found.")
+
+    now = datetime.now(timezone.utc)
+    granted_until = now + timedelta(hours=req.duration_hours)
+    org.support_access_granted_until = granted_until
+    org.support_access_granted_by = current_user.id
+    await db.flush()
+
+    await record_audit_log_async(
+        org_id=org_id,
+        user_id=current_user.id,
+        action="SUPPORT_ACCESS_GRANTED",
+        target_type="organization",
+        target_id=org_id,
+        details={"duration_hours": req.duration_hours, "granted_until": granted_until.isoformat()},
+        db=db
+    )
+
+    return {
+        "message": f"Support access granted for {req.duration_hours} hour(s).",
+        "granted_until": granted_until,
+        "granted_by": current_user.id
+    }
+
+@router.post("/organizations/{organization_id}/support-access/revoke")
+async def revoke_support_access(
+    organization_id: str,
+    current_user: User = Depends(require_permission("support:grant_access")),
+    db: AsyncSession = Depends(get_db)
+):
+    """Immediately terminates granted platform support access."""
+    org_id = verify_tenant_access(current_user, organization_id)
+    stmt = select(Organization).where(Organization.id == org_id)
+    res = await db.execute(stmt)
+    org = res.scalar_one_or_none()
+    if not org:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Organization not found.")
+
+    org.support_access_granted_until = None
+    org.support_access_granted_by = None
+    await db.flush()
+
+    await record_audit_log_async(
+        org_id=org_id,
+        user_id=current_user.id,
+        action="SUPPORT_ACCESS_REVOKED",
+        target_type="organization",
+        target_id=org_id,
+        details={},
+        db=db
+    )
+
+    return {"message": "Support access revoked successfully."}
+
+@router.patch("/organizations/{organization_id}/security-policy")
+async def update_security_policy(
+    organization_id: str,
+    req: UpdateSecurityPolicyRequest,
+    current_user: User = Depends(require_permission("org:write")),
+    db: AsyncSession = Depends(get_db)
+):
+    """Configures organization-wide security posture (MFA enforcement, IP allowlists)."""
+    org_id = verify_tenant_access(current_user, organization_id)
+    stmt = select(Organization).where(Organization.id == org_id)
+    res = await db.execute(stmt)
+    org = res.scalar_one_or_none()
+    if not org:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Organization not found.")
+
+    if req.mfa_enforced is not None:
+        org.mfa_enforced = req.mfa_enforced
+    if req.ip_allowlist is not None:
+        org.ip_allowlist = req.ip_allowlist
+
+    await db.flush()
+
+    await record_audit_log_async(
+        org_id=org_id,
+        user_id=current_user.id,
+        action="SECURITY_POLICY_UPDATED",
+        target_type="organization",
+        target_id=org_id,
+        details={"mfa_enforced": org.mfa_enforced, "ip_allowlist": org.ip_allowlist},
+        db=db
+    )
+
+    return {
+        "mfa_enforced": org.mfa_enforced,
+        "ip_allowlist": org.ip_allowlist,
+        "message": "Security policy updated successfully."
+    }
+

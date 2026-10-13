@@ -198,3 +198,55 @@ async def get_analytics(
         "total_cost_usd": round(total_cost, 4),
         "top_channels": top_channels
     }
+
+@router.get("/api/v1/billing/entitlements")
+async def get_organization_entitlements(
+    organization_id: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Unified entitlements and seat quota status."""
+    from services.billing.entitlements import entitlements_service
+    org_id = verify_tenant_access(current_user, organization_id)
+    plan_details = await entitlements_service.get_tenant_plan_details(org_id, db)
+    has_seat, allocated_seats, max_seats = await entitlements_service.check_seat_availability(org_id, db)
+
+    summary = await metering_service.get_organization_usage_summary_async(org_id, db=db)
+    current_turns = summary.get("current_month_turns", 0)
+    limit_turns = plan_details["limits"]["max_conversations"]
+    alert_tier = entitlements_service.calculate_spend_alert_level(current_turns, limit_turns)
+
+    return {
+        "organization_id": org_id,
+        "plan": plan_details["plan_name"],
+        "features": plan_details["features"],
+        "limits": plan_details["limits"],
+        "seats": {
+            "has_available_seat": has_seat,
+            "allocated_seats": allocated_seats,
+            "max_seats": max_seats
+        },
+        "spend_alert_tier": alert_tier
+    }
+
+@router.get("/api/v1/billing/dunning-status")
+async def get_dunning_status(
+    organization_id: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Evaluates dunning lifecycle: healthy, soft degrade (grace period), or hard suspend."""
+    from services.billing.entitlements import entitlements_service
+    org_id = verify_tenant_access(current_user, organization_id)
+    sub = await metering_service.get_or_create_subscription_async(org_id, db=db)
+    dunning_info = entitlements_service.evaluate_dunning_status(
+        subscription_status=sub.get("subscription_status", "active"),
+        dunning_grace_period_until=sub.get("dunning_grace_period_until")
+    )
+    return {
+        "organization_id": org_id,
+        "subscription_status": sub.get("subscription_status", "active"),
+        "dunning": dunning_info,
+        "portal_recovery_url": "/app/billing"
+    }
+

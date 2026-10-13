@@ -209,7 +209,7 @@ class UsageMeteringService:
             except Exception:
                 session = None
 
-        plan_name = "FREE"
+        plan_name = "STARTER"
         default_limits = self.PLAN_LIMITS[plan_name]
 
         sub_dict = {
