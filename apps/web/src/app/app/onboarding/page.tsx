@@ -2,7 +2,7 @@
 import React, { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { ChevronRight, Building2, BookOpen, Bot, Rocket, Sparkles, Play } from 'lucide-react';
-import { API_BASE } from '@/lib/api';
+import { API_BASE, authFetch } from '@/lib/api';
 
 export default function OnboardingWizardPage() {
   const [currentStep, setCurrentStep] = useState(1);
@@ -32,9 +32,8 @@ export default function OnboardingWizardPage() {
       setCurrentStep(prev => prev + 1);
     } else {
       try {
-        const propRes = await fetch(`${API_BASE}/api/v1/properties`, {
+        const propRes = await authFetch(`${API_BASE}/api/v1/properties`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             organization_id: 'org_azure_group',
             name: formData.propertyName,
@@ -45,9 +44,8 @@ export default function OnboardingWizardPage() {
         const propData = await propRes.json();
         const propertyId = propData.id || 'prop_azure_palm_resort';
 
-        await fetch(`${API_BASE}/api/v1/agents`, {
+        await authFetch(`${API_BASE}/api/v1/agents`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             organization_id: 'org_azure_group',
             property_id: propertyId,
