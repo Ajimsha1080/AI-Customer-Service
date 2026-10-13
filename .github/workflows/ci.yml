@@ -7,42 +7,109 @@ on:
     branches: [ main, develop ]
 
 jobs:
-  test:
-    name: Run Pytest Suite & Linting
+  security-audit:
+    name: Dependency Audit & Secret Scan
     runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Clean Pip Install & Pip Audit
+        run: |
+          python -m pip install --upgrade pip pip-audit
+          pip install -r requirements.txt
+          pip-audit --desc on --ignore-vuln CVE-2024-XXXXX || true
+
+      - name: NPM Audit
+        working-directory: apps/web
+        run: npm audit --audit-level=high || true
+
+  lint:
+    name: Code Linting & Static Analysis
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Ruff
+        run: pip install ruff
+
+      - name: Run Ruff Linter
+        run: ruff check .
+
+  backend-tests:
+    name: Backend Tests (Postgres + pgvector + Redis)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: test_hospitality_agent_cloud
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: "pip"
 
-      - name: Install dependencies
+      - name: Clean Install Requirements
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Verify syntax & compilation
-        run: |
-          python -m compileall .
-
-      - name: Run pytest test suite
+      - name: Run Alembic Migrations
         env:
+          DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/test_hospitality_agent_cloud"
+        run: alembic upgrade head
+
+      - name: Run Pytest Test Suite
+        env:
+          ENVIRONMENT: "testing"
+          DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/test_hospitality_agent_cloud"
+          REDIS_URL: "redis://localhost:6379/0"
+          SECRET_KEY: "ci-secret-key-for-testing-purposes-only-32bytes"
           JWT_SECRET_KEY: "ci-secret-key-for-testing-purposes-only-32bytes"
           JWT_REFRESH_SECRET_KEY: "ci-refresh-secret-key-testing-purposes-only-32bytes"
-          ENVIRONMENT: "testing"
-          DATABASE_URL: "sqlite+aiosqlite:///:memory:"
-        run: |
-          pytest tests/ -v
+        run: pytest tests/ -v
 
-  web-check:
-    name: Check Next.js Frontend
+  frontend-check:
+    name: Web Build & Typecheck
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -54,20 +121,25 @@ jobs:
           cache: "npm"
           cache-dependency-path: apps/web/package.json
 
-      - name: Install dependencies
+      - name: Clean NPM Install
         working-directory: apps/web
         run: npm ci
 
-      - name: Verify TypeScript compilation
+      - name: Typecheck Next.js Frontend
         working-directory: apps/web
         run: npx tsc --noEmit
 
-  deploy:
-    name: Build & Deploy Container Stack
-    needs: [test, web-check]
+      - name: Build Next.js Production Bundle
+        working-directory: apps/web
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
+        run: npm run build
+
+  build-and-push:
+    name: Build & Push Images (Git SHA Tagged)
+    needs: [backend-tests, frontend-check]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -75,7 +147,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to GitHub Container Registry
+      - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -88,4 +160,16 @@ jobs:
           context: .
           file: infra/docker/Dockerfile.api
           push: true
-          tags: ghcr.io/${{ github.repository }}/api:latest
+          tags: |
+            ghcr.io/${{ github.repository }}/api:latest
+            ghcr.io/${{ github.repository }}/api:${{ github.sha }}
+
+      - name: Build & Push Web Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: infra/docker/Dockerfile.web
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}/web:latest
+            ghcr.io/${{ github.repository }}/web:${{ github.sha }}

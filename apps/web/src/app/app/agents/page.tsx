@@ -1,34 +1,93 @@
 'use client';
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { Bot, Play, CheckCircle2, Code, Sparkles, Copy, Check } from 'lucide-react';
+import { Bot, Play, CheckCircle2, Code, Sparkles, Copy, Check, Loader2, Plus, ExternalLink } from 'lucide-react';
+import { authFetch, getCurrentSession, API_BASE } from '@/lib/api';
 
 export default function AppAgentsPage() {
-  const [activeStep, setActiveStep] = useState<number>(1);
+  const [agents, setAgents] = useState<any[]>([]);
+  const [selectedAgent, setSelectedAgent] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
   const [copiedCode, setCopiedCode] = useState(false);
+  const [session, setSession] = useState<any>(null);
 
-  // Simple configuration state
-  const [agentName, setAgentName] = useState('Hostel AI Agent');
-  const [description, setDescription] = useState('Autonomous Hostel AI Assistant for resident questions, mess menu, notices, and room maintenance.');
-  const [hostelName, setHostelName] = useState('Azure Palm Hostel & Campus Residence');
+  // Create agent modal
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [agentName, setAgentName] = useState('Front Desk AI Concierge');
+  const [creating, setCreating] = useState(false);
 
-  const [enabledTools] = useState([
-    { id: 't1', name: 'Food Menu & Timings', desc: 'Queries today\'s mess menu and meal schedule', enabled: true },
-    { id: 't2', name: 'Notices & Announcements', desc: 'Fetches active hostel gate and event notices', enabled: true },
-    { id: 't3', name: 'Hostel Facilities', desc: 'Checks laundry, gym, common room status', enabled: true },
-    { id: 't4', name: 'Room & Availability', desc: 'Provides room types and occupancy info', enabled: true },
-    { id: 't5', name: 'Maintenance Requests', desc: 'Creates maintenance tickets for room issues', enabled: true },
-    { id: 't6', name: 'Resident Information', desc: 'Verifies resident room allocations privately', enabled: true },
-    { id: 't7', name: 'Staff Escalation', desc: 'Hands off complex issues to hostel warden', enabled: true }
-  ]);
+  const loadAgents = async () => {
+    setLoading(true);
+    try {
+      const sess = await getCurrentSession();
+      setSession(sess);
+      if (sess?.organization_id) {
+        const res = await authFetch(`/api/v1/agents?organization_id=${sess.organization_id}`);
+        if (res.ok) {
+          const data = await res.json();
+          const list = Array.isArray(data) ? data : [];
+          setAgents(list);
+          if (list.length > 0 && !selectedAgent) {
+            setSelectedAgent(list[0]);
+          }
+        }
+      }
+    } catch (err) {
+      console.error('Failed to load agents:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
 
-  const embedSnippet = `<script 
-  src="http://localhost:3001/widget.js" 
-  data-agent-id="agt_hostel_01" 
-  data-property="Azure Palm Hostel">
-</script>`;
+  useEffect(() => {
+    loadAgents();
+  }, []);
+
+  const handleCreateAgent = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!session?.organization_id) return;
+    setCreating(true);
+
+    try {
+      const propRes = await authFetch(`/api/v1/properties?organization_id=${session.organization_id}`);
+      let propId = 'prop_default';
+      if (propRes.ok) {
+        const props = await propRes.json();
+        if (Array.isArray(props) && props.length > 0) {
+          propId = props[0].id;
+        }
+      }
+
+      const res = await authFetch('/api/v1/agents', {
+        method: 'POST',
+        body: JSON.stringify({
+          organization_id: session.organization_id,
+          property_id: propId,
+          name: agentName,
+          agent_type: 'CONCIERGE',
+          tone: 'Friendly, Professional'
+        })
+      });
+
+      if (res.ok) {
+        setIsModalOpen(false);
+        setAgentName('');
+        await loadAgents();
+      }
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const widgetUrl = typeof window !== 'undefined' ? `${window.location.origin}/widget.js` : 'http://localhost:3000/widget.js';
+  const embedSnippet = selectedAgent ? `<script 
+  src="${widgetUrl}" 
+  data-agent-key="${selectedAgent.id}"
+  data-api-base="${API_BASE}">
+</script>` : '';
 
   const copyEmbedCode = () => {
+    if (!embedSnippet) return;
     navigator.clipboard.writeText(embedSnippet);
     setCopiedCode(true);
     setTimeout(() => setCopiedCode(false), 3000);
@@ -36,193 +95,159 @@ export default function AppAgentsPage() {
 
   return (
     <div className="max-w-6xl mx-auto space-y-8 font-sans">
-      {/* Header */}
       <div className="flex items-center justify-between border-b border-zinc-200 pb-6">
         <div>
-          <h1 className="text-2xl font-bold text-zinc-900">AI Assistant</h1>
-          <p className="text-xs text-zinc-500 mt-1">Manage your single Hostel AI Assistant, knowledge sources, connected live tools, and embed snippet.</p>
+          <h1 className="text-2xl font-bold text-zinc-900">AI Concierge & Agents</h1>
+          <p className="text-xs text-zinc-500 mt-1">Deploy, configure, and monitor AI agents with real-time tool calling and web widget snippets.</p>
         </div>
 
-        <span className="yc-badge-emerald font-mono text-xs px-3.5 py-1 font-semibold">
-          ● Hostel AI Agent Active & Deployed
-        </span>
+        <button
+          onClick={() => setIsModalOpen(true)}
+          className="yc-btn-primary flex items-center gap-1.5 text-xs"
+        >
+          <Plus className="w-3.5 h-3.5" /> Deploy New Agent
+        </button>
       </div>
 
-      {/* Main Agent Identity Card */}
-      <div className="yc-card p-6 space-y-6">
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <div className="w-12 h-12 rounded-2xl bg-zinc-900 text-white flex items-center justify-center font-bold text-2xl shadow-xs">
-              🤖
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h2 className="text-lg font-bold text-zinc-900">{agentName}</h2>
-                <span className="yc-badge-emerald font-mono text-[10px]">● ACTIVE</span>
-              </div>
-              <p className="text-xs text-zinc-500 mt-0.5">{description}</p>
-            </div>
-          </div>
-
-          <Link href="/guest/agt_hostel_01" className="yc-btn-primary px-4 py-2 text-xs flex items-center gap-1.5 self-start md:self-auto">
-            Test Resident View ➔
-          </Link>
+      {loading ? (
+        <div className="py-16 flex flex-col items-center justify-center gap-3 text-zinc-500">
+          <Loader2 className="w-8 h-8 animate-spin text-zinc-700" />
+          <p className="text-xs">Loading agents...</p>
         </div>
-
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 bg-zinc-50 p-4 rounded-xl border border-zinc-200 text-xs font-mono">
-          <div>
-            <span className="text-zinc-500 block text-[10px] uppercase font-semibold">HOSTEL PROPERTY</span>
-            <span className="text-zinc-900 font-bold">{hostelName}</span>
-          </div>
-          <div>
-            <span className="text-zinc-500 block text-[10px] uppercase font-semibold">KNOWLEDGE STATUS</span>
-            <span className="text-emerald-700 font-bold">4 Docs Indexed (RAG)</span>
-          </div>
-          <div>
-            <span className="text-zinc-500 block text-[10px] uppercase font-semibold">CONNECTED LIVE TOOLS</span>
-            <span className="text-zinc-900 font-bold">7 Active (Real-Time DB)</span>
-          </div>
-          <div>
-            <span className="text-zinc-500 block text-[10px] uppercase font-semibold">DEPLOYMENT</span>
-            <span className="text-emerald-600 font-bold">Web Chat & Indic Voice</span>
-          </div>
-        </div>
-      </div>
-
-      {/* Simplified 3-Step Configuration Wizard */}
-      <div className="yc-card p-6 space-y-6">
-        <h2 className="text-sm font-bold text-zinc-900 border-b border-zinc-200 pb-3">
-          Simplified Assistant Setup
-        </h2>
-
-        {/* Wizard Step Selector Tabs */}
-        <div className="flex items-center gap-2">
+      ) : agents.length === 0 ? (
+        <div className="yc-card p-12 text-center space-y-4">
+          <Bot className="w-12 h-12 text-zinc-400 mx-auto" />
+          <h3 className="text-sm font-bold text-zinc-900">No AI Agents Deployed</h3>
+          <p className="text-xs text-zinc-500 max-w-sm mx-auto">Create and activate your first AI concierge agent to assist guests with bookings, amenities, and room requests.</p>
           <button
-            onClick={() => setActiveStep(1)}
-            className={`flex-1 p-3 rounded-xl border text-left transition-all ${
-              activeStep === 1 ? 'bg-zinc-900 text-white border-zinc-900 shadow-xs' : 'bg-zinc-50 border-zinc-200 text-zinc-600 hover:bg-zinc-100'
-            }`}
+            onClick={() => setIsModalOpen(true)}
+            className="yc-btn-primary text-xs inline-flex items-center gap-1.5"
           >
-            <div className="text-[10px] font-mono uppercase font-semibold opacity-70">STEP 1</div>
-            <div className="text-xs font-bold mt-0.5">Basic Information</div>
-          </button>
-
-          <button
-            onClick={() => setActiveStep(2)}
-            className={`flex-1 p-3 rounded-xl border text-left transition-all ${
-              activeStep === 2 ? 'bg-zinc-900 text-white border-zinc-900 shadow-xs' : 'bg-zinc-50 border-zinc-200 text-zinc-600 hover:bg-zinc-100'
-            }`}
-          >
-            <div className="text-[10px] font-mono uppercase font-semibold opacity-70">STEP 2</div>
-            <div className="text-xs font-bold mt-0.5">Knowledge Sources</div>
-          </button>
-
-          <button
-            onClick={() => setActiveStep(3)}
-            className={`flex-1 p-3 rounded-xl border text-left transition-all ${
-              activeStep === 3 ? 'bg-zinc-900 text-white border-zinc-900 shadow-xs' : 'bg-zinc-50 border-zinc-200 text-zinc-600 hover:bg-zinc-100'
-            }`}
-          >
-            <div className="text-[10px] font-mono uppercase font-semibold opacity-70">STEP 3</div>
-            <div className="text-xs font-bold mt-0.5">Live Tools & Deploy</div>
+            <Plus className="w-4 h-4" /> Deploy Agent
           </button>
         </div>
-
-        {/* STEP 1 CONTENT */}
-        {activeStep === 1 && (
-          <div className="space-y-4 max-w-lg text-xs font-sans">
-            <div className="space-y-1">
-              <label className="font-semibold text-zinc-700">Agent Name</label>
-              <input
-                type="text"
-                value={agentName}
-                onChange={(e) => setAgentName(e.target.value)}
-                className="w-full bg-zinc-50 border border-zinc-200 rounded-xl px-3.5 py-2 text-zinc-900 focus:outline-none focus:border-zinc-400"
-              />
-            </div>
-
-            <div className="space-y-1">
-              <label className="font-semibold text-zinc-700">Description</label>
-              <input
-                type="text"
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-                className="w-full bg-zinc-50 border border-zinc-200 rounded-xl px-3.5 py-2 text-zinc-900 focus:outline-none focus:border-zinc-400"
-              />
-            </div>
-
-            <div className="space-y-1">
-              <label className="font-semibold text-zinc-700">Hostel Name</label>
-              <input
-                type="text"
-                value={hostelName}
-                onChange={(e) => setHostelName(e.target.value)}
-                className="w-full bg-zinc-50 border border-zinc-200 rounded-xl px-3.5 py-2 text-zinc-900 focus:outline-none focus:border-zinc-400"
-              />
-            </div>
-          </div>
-        )}
-
-        {/* STEP 2 CONTENT */}
-        {activeStep === 2 && (
-          <div className="space-y-4 text-xs font-sans">
-            <p className="text-zinc-600">The AI assistant uses your uploaded documents for answers about hostel rules, visitor policies, and FAQs.</p>
-
-            <div className="p-4 bg-zinc-50 rounded-xl border border-zinc-200 space-y-2">
-              <div className="font-bold text-zinc-900">Indexed Knowledge Documents (4)</div>
-              <ul className="space-y-1 text-zinc-600 list-disc pl-4 font-mono text-[11px]">
-                <li>Azure Hostel Resident Rules & Visitor Policy 2026.pdf</li>
-                <li>Frequently Asked Questions (Hostel FAQs).txt</li>
-                <li>General Hostel Facilities & Contact Directory.pdf</li>
-                <li>Hostel Official Website (https://azurehostel.edu/info)</li>
-              </ul>
-            </div>
-
-            <Link href="/app/knowledge" className="inline-block px-4 py-2 bg-zinc-900 text-white rounded-xl font-semibold text-xs hover:bg-black">
-              Manage Knowledge Base ➔
-            </Link>
-          </div>
-        )}
-
-        {/* STEP 3 CONTENT */}
-        {activeStep === 3 && (
-          <div className="space-y-6 text-xs font-sans">
-            <div>
-              <h3 className="font-bold text-zinc-900 mb-2">Enabled Operational Tools</h3>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                {enabledTools.map(t => (
-                  <div key={t.id} className="p-3 bg-zinc-50 border border-zinc-200 rounded-xl flex items-center justify-between">
-                    <div>
-                      <div className="font-bold text-zinc-900">{t.name}</div>
-                      <div className="text-[11px] text-zinc-500">{t.desc}</div>
-                    </div>
-                    <span className="yc-badge-emerald text-[10px]">● ENABLED</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {/* Embed HTML Code Snippet */}
-            <div className="p-5 bg-zinc-900 text-white rounded-2xl space-y-3">
-              <div className="flex items-center justify-between">
-                <span className="font-mono text-xs font-bold text-emerald-400 flex items-center gap-1.5">
-                  <Code className="w-4 h-4" /> Deploy Widget Snippet
-                </span>
-                <button
-                  onClick={copyEmbedCode}
-                  className="px-3 py-1 bg-zinc-800 hover:bg-zinc-700 text-white rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors"
+      ) : (
+        <div className="space-y-6">
+          {/* Agent Picker */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            {agents.map((a) => {
+              const isSelected = selectedAgent?.id === a.id;
+              return (
+                <div
+                  key={a.id}
+                  onClick={() => setSelectedAgent(a)}
+                  className={`yc-card p-4 cursor-pointer transition border-2 ${
+                    isSelected ? 'border-zinc-900 bg-zinc-50/50' : 'border-transparent hover:border-zinc-300'
+                  }`}
                 >
-                  {copiedCode ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                  {copiedCode ? 'Copied!' : 'Copy Code'}
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="font-mono text-[10px] font-bold uppercase px-2 py-0.5 rounded bg-zinc-200 text-zinc-700">
+                      {a.agent_type || 'CONCIERGE'}
+                    </span>
+                    <span className="text-[10px] text-emerald-600 font-bold">● ACTIVE</span>
+                  </div>
+                  <h3 className="font-bold text-sm text-zinc-900">{a.name}</h3>
+                  <p className="text-xs text-zinc-500 font-mono mt-1">{a.id}</p>
+                </div>
+              );
+            })}
+          </div>
+
+          {selectedAgent && (
+            <div className="space-y-6">
+              {/* Active Agent Overview Card */}
+              <div className="yc-card p-6 space-y-6">
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                  <div className="flex items-center gap-3">
+                    <div className="w-12 h-12 rounded-2xl bg-zinc-900 text-white flex items-center justify-center font-bold text-xl shadow-xs">
+                      🤖
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <h2 className="text-lg font-bold text-zinc-900">{selectedAgent.name}</h2>
+                        <span className="yc-badge-emerald font-mono text-[10px]">● DEPLOYED</span>
+                      </div>
+                      <p className="text-xs text-zinc-500 mt-0.5 font-mono">ID: {selectedAgent.id}</p>
+                    </div>
+                  </div>
+
+                  <Link 
+                    href={`/guest/${selectedAgent.id}`} 
+                    target="_blank"
+                    className="yc-btn-primary px-4 py-2 text-xs flex items-center gap-1.5 self-start md:self-auto"
+                  >
+                    Open Guest View <ExternalLink className="w-3.5 h-3.5" />
+                  </Link>
+                </div>
+              </div>
+
+              {/* Embeddable Snippet Section */}
+              <div className="yc-card p-6 space-y-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Code className="w-4 h-4 text-zinc-700" />
+                    <h2 className="text-sm font-bold text-zinc-900">Embeddable Web Widget Snippet</h2>
+                  </div>
+                  <button
+                    onClick={copyEmbedCode}
+                    className="yc-btn-secondary text-xs flex items-center gap-1.5"
+                  >
+                    {copiedCode ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
+                    {copiedCode ? 'Copied Snippet' : 'Copy HTML Snippet'}
+                  </button>
+                </div>
+
+                <p className="text-xs text-zinc-500">
+                  Paste this snippet right before the closing <code className="text-zinc-800 bg-zinc-100 px-1 py-0.5 rounded font-mono">&lt;/body&gt;</code> tag on any guest portal or hotel website.
+                </p>
+
+                <div className="p-4 bg-zinc-950 text-zinc-100 rounded-xl font-mono text-xs overflow-x-auto shadow-inner">
+                  <pre>{embedSnippet}</pre>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Deploy Agent Modal */}
+      {isModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-xl border border-zinc-200">
+            <h3 className="text-base font-bold text-zinc-900 mb-4">Deploy New AI Concierge</h3>
+            <form onSubmit={handleCreateAgent} className="space-y-4 text-xs">
+              <div>
+                <label className="block font-medium text-zinc-700 mb-1">Agent Name</label>
+                <input
+                  type="text"
+                  required
+                  value={agentName}
+                  onChange={(e) => setAgentName(e.target.value)}
+                  placeholder="e.g. Resort Host AI"
+                  className="w-full border border-zinc-200 rounded-lg p-2.5 bg-zinc-50 text-zinc-900"
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setIsModalOpen(false)}
+                  className="px-4 py-2 rounded-lg border border-zinc-200 text-zinc-600 hover:bg-zinc-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={creating}
+                  className="px-4 py-2 rounded-lg bg-zinc-900 text-white hover:bg-zinc-800 disabled:opacity-50"
+                >
+                  {creating ? 'Deploying...' : 'Deploy Agent'}
                 </button>
               </div>
-              <pre className="font-mono text-[11px] text-zinc-300 overflow-x-auto p-3 bg-black/50 rounded-xl border border-zinc-800">
-                {embedSnippet}
-              </pre>
-            </div>
+            </form>
           </div>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   );
 }

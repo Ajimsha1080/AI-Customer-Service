@@ -1,7 +1,7 @@
 'use client';
 import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { API_BASE } from '@/lib/api';
+import { API_BASE, authFetch } from '@/lib/api';
 import { 
   Building2, 
   Bot, 
@@ -32,9 +32,9 @@ export default function PlatformDashboardPage() {
     offline_agents: 0,
     connected_integrations: 1,
     failed_integrations: 0,
-    system_health: '100% OPERATIONAL',
-    sla_uptime: '99.99%',
-    p95_latency_ms: 340,
+    system_health: 'OPERATIONAL',
+    sla_uptime: '100.0%',
+    p95_latency_ms: 0,
   });
 
   const [orgs, setOrgs] = useState<any[]>([]);
@@ -48,8 +48,8 @@ export default function PlatformDashboardPage() {
     async function loadInitialData() {
       try {
         const [tRes, oRes] = await Promise.all([
-          fetch(`${API_BASE}/api/v1/platform/telemetry`).then(r => r.ok ? r.json() : null),
-          fetch(`${API_BASE}/api/v1/organizations`).then(r => r.ok ? r.json() : [])
+          authFetch('/api/v1/platform/telemetry').then(r => r.ok ? r.json() : null),
+          authFetch('/api/v1/organizations').then(r => r.ok ? r.json() : [])
         ]);
 
         if (tRes) {
@@ -61,7 +61,7 @@ export default function PlatformDashboardPage() {
         if (Array.isArray(oRes) && oRes.length > 0) {
           setOrgs(oRes);
         } else {
-          setOrgs([{ id: 'org_azure_group', name: 'Azure Palm Hostel & Residence', slug: 'azure-palm', status: 'ACTIVE' }]);
+          setOrgs([]);
         }
       } catch (err) {
         console.error("Error fetching platform telemetry:", err);
@@ -93,8 +93,8 @@ export default function PlatformDashboardPage() {
 
           const newEvt = {
             id: Date.now() + Math.random(),
-            org_id: data.organization_id || 'org_azure_group',
-            org_name: data.org_name || 'Azure Palm Hostel',
+            org_id: data.organization_id || '',
+            org_name: data.org_name || 'Organization',
             summary: data.summary || data.action || 'Operational live update recorded',
             status: data.status || 'ONLINE',
             timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
@@ -145,11 +145,9 @@ export default function PlatformDashboardPage() {
         <span className="text-zinc-500 font-mono text-[11px] px-3 font-semibold">PORTAL SWITCHER:</span>
         <div className="flex items-center gap-1">
           <Link href="/app/dashboard" className="px-3 py-1.5 rounded-xl text-zinc-600 hover:text-zinc-900 transition-colors">
-            🏨 Hostel SaaS Admin
+            🏨 Tenant Admin
           </Link>
-          <Link href="/guest/agt_hostel_01" className="px-3 py-1.5 rounded-xl text-zinc-600 hover:text-zinc-900 transition-colors">
-            💬 Resident AI Chat
-          </Link>
+          
           <Link href="/platform/dashboard" className="px-3 py-1.5 rounded-xl bg-zinc-900 text-white shadow-xs">
             🛡️ Super Admin Control Plane
           </Link>
@@ -181,7 +179,7 @@ export default function PlatformDashboardPage() {
 
         <div className="flex items-center gap-2 text-xs font-mono">
           <span className="px-3 py-1.5 rounded-lg bg-zinc-100 border border-zinc-200 text-zinc-700">Cluster: us-east-1-prod</span>
-          <span className="px-3 py-1.5 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-700 font-bold">● SLA {telemetry.sla_uptime || '99.99%'}</span>
+          <span className="px-3 py-1.5 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-700 font-bold">● SLA {telemetry.sla_uptime || '100.0%'}</span>
         </div>
       </div>
 
@@ -347,7 +345,7 @@ export default function PlatformDashboardPage() {
                 >
                   <div className="space-y-1">
                     <div className="flex items-center gap-2">
-                      <span className="font-bold text-zinc-900">{evt.org_name || 'Azure Palm Hostel'}</span>
+                      <span className="font-bold text-zinc-900">{evt.org_name || 'Organization'}</span>
                       {getStatusBadge(evt.status || 'ONLINE')}
                     </div>
                     <p className="text-zinc-700 text-[11px] font-normal leading-relaxed">{evt.summary}</p>

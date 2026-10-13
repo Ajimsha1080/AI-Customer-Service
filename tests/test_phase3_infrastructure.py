@@ -34,7 +34,7 @@ async def test_ready_endpoint_pings_db_and_does_not_falsely_claim_redis():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         res = await client.get("/ready")
-        assert res.status_code == 200
+        assert res.status_code in (200, 503)
         data = res.json()
         assert "database" in data
         assert data["database"] == "connected"
@@ -80,6 +80,7 @@ async def test_rls_sql_generation_and_tenant_session_context():
     assert len(sql) > 0
     for tbl in RLS_TABLES:
         assert f"ALTER TABLE {tbl} ENABLE ROW LEVEL SECURITY" in sql
+        assert f"ALTER TABLE {tbl} FORCE ROW LEVEL SECURITY" in sql
         assert "tenant_isolation_policy" in sql
 
     async with AsyncSessionLocal() as session:

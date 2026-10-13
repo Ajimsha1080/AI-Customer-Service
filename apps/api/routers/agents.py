@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from services.database.session import get_db
+from services.database.session import get_db, set_tenant_context
 from services.database.models import (
     User, Agent, AgentConfig, UserRole, Conversation, Message,
     SupportTicket, ConversationStatus
@@ -253,6 +253,7 @@ async def agent_chat(request: Request, agent_id: str, req: AgentChatRequest, db:
             detail=f"Mismatched organization_id. Agent '{agent_id}' belongs to tenant '{agent.organization_id}'."
         )
     effective_org_id = agent.organization_id
+    await set_tenant_context(db, effective_org_id)
 
     allowed, reason, details = await metering_service.check_billing_quota(effective_org_id, resource="agent_turn", db=db)
     if not allowed:
@@ -323,7 +324,7 @@ async def agent_chat(request: Request, agent_id: str, req: AgentChatRequest, db:
 
     agent_config = {
         "model_name": config.model_name if config else "sarvam-2b",
-        "system_prompt": config.system_prompt if config else "You are the head AI Concierge for Azure Palm Resort. Assist guests with amenities, pool hours, dining, and bookings.",
+        "system_prompt": config.system_prompt if config else f"You are the AI Concierge for {agent.name}. Assist guests with amenities, services, dining, and requests.",
         "enabled_tools": config.enabled_tools if (config and config.enabled_tools) else [
             "search_property_information", "get_facility_status", "check_room_availability",
             "create_booking", "get_current_property_updates", "get_today_activities",
@@ -435,6 +436,7 @@ async def agent_chat_stream(request: Request, agent_id: str, req: AgentChatReque
             detail=f"Mismatched organization_id. Agent '{agent_id}' belongs to tenant '{agent.organization_id}'."
         )
     effective_org_id = agent.organization_id
+    await set_tenant_context(db, effective_org_id)
 
     allowed, reason, _ = await metering_service.check_billing_quota(effective_org_id, resource="agent_turn", db=db)
     if not allowed:
@@ -494,7 +496,7 @@ async def agent_chat_stream(request: Request, agent_id: str, req: AgentChatReque
 
     agent_config = {
         "model_name": config.model_name if config else "sarvam-2b",
-        "system_prompt": config.system_prompt if config else "You are the head AI Concierge for Azure Palm Resort.",
+        "system_prompt": config.system_prompt if config else f"You are the AI Concierge for {agent.name}.",
         "enabled_tools": config.enabled_tools if (config and config.enabled_tools) else []
     }
 

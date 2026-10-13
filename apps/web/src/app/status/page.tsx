@@ -2,7 +2,7 @@
 import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { CheckCircle2, AlertTriangle, Activity, ArrowLeft, RefreshCw, ShieldCheck } from 'lucide-react';
-import { API_BASE } from '@/lib/api';
+import { API_BASE, authFetch } from '@/lib/api';
 
 interface ServiceStatus {
   name: string;
@@ -59,12 +59,12 @@ export default function PublicStatusPage() {
     setChecking(true);
     const start = performance.now();
     try {
-      const res = await fetch(`${API_BASE}/health`, { cache: 'no-store' });
+      const res = await authFetch('/health', { cache: 'no-store' });
       const elapsed = Math.round(performance.now() - start);
 
       let readyData: any = null;
       try {
-        const readyRes = await fetch(`${API_BASE}/ready`, { cache: 'no-store' });
+        const readyRes = await authFetch('/ready', { cache: 'no-store' });
         if (readyRes.ok) {
           readyData = await readyRes.json();
         }

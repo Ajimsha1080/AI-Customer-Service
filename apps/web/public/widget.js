@@ -1,18 +1,16 @@
 /**
  * Hospitality Agent Cloud - Embeddable Web Chat & Voice Widget
- * Premium zero-dependency widget snippet for hotel/resort guest websites.
+ * Zero-dependency widget snippet for guest websites.
  */
 (function () {
   const currentScript = document.currentScript || Array.from(document.querySelectorAll('script')).pop();
-  const agentId = currentScript ? (currentScript.getAttribute('data-agent-id') || 'agt_hostel_01') : 'agt_hostel_01';
+  const agentKey = currentScript ? (currentScript.getAttribute('data-agent-key') || currentScript.getAttribute('data-agent-id') || '') : '';
   const apiBase = currentScript ? (currentScript.getAttribute('data-api-base') || 'http://localhost:8000') : 'http://localhost:8000';
-  const orgId = currentScript ? (currentScript.getAttribute('data-org-id') || 'org_azure_group') : 'org_azure_group';
-  const propertyId = currentScript ? (currentScript.getAttribute('data-property-id') || 'prop_azure_palm_resort') : 'prop_azure_palm_resort';
 
   let widgetState = {
     isOpen: false,
     messages: [
-      { sender: 'agent', text: 'Welcome to Azure Hostel! I am your Hostel AI Assistant. Ask me anything about mess menu, timings, rules, or room maintenance.' }
+      { sender: 'agent', text: 'Hello! I am your AI Concierge. How can I assist you today?' }
     ],
     isListening: false
   };
@@ -187,19 +185,19 @@
     <div class="hac-widget-header">
       <div class="hac-widget-header-title">
         <span class="hac-widget-status-dot"></span>
-        <span>Hostel AI Assistant</span>
+        <span>AI Concierge</span>
       </div>
       <button id="hac-close-btn" style="background:none;border:none;color:white;cursor:pointer;font-size:18px;">✕</button>
     </div>
     <div class="hac-widget-messages" id="hac-messages-container"></div>
     <div class="hac-quick-actions">
-      <button class="hac-quick-btn" data-query="🍽️ What's for dinner today?">🍽️ Dinner Menu</button>
-      <button class="hac-quick-btn" data-query="⏰ What time is dinner?">⏰ Timings</button>
-      <button class="hac-quick-btn" data-query="📜 Visitor Rules">📜 Rules</button>
-      <button class="hac-quick-btn" data-query="🔧 My fan isn't working.">🔧 Maintenance</button>
+      <button class="hac-quick-btn" data-query="What amenities and services are available?">✨ Amenities</button>
+      <button class="hac-quick-btn" data-query="What dining options and timings are available?">🍽️ Dining</button>
+      <button class="hac-quick-btn" data-query="What are the check-in and check-out timings?">⏰ Timings</button>
+      <button class="hac-quick-btn" data-query="I would like to speak with human staff">👤 Staff Support</button>
     </div>
     <div class="hac-widget-input-area">
-      <input type="text" class="hac-widget-input" id="hac-input-field" placeholder="Ask about hostel menu, timings, rules..." />
+      <input type="text" class="hac-widget-input" id="hac-input-field" placeholder="Ask anything about amenities, dining, timings..." />
       <button class="hac-widget-voice-btn" id="hac-voice-btn" title="Voice Input">🎙️</button>
       <button class="hac-widget-send-btn" id="hac-send-btn" title="Send Message">➔</button>
     </div>
@@ -227,30 +225,25 @@
 
   async function sendMessage(text) {
     if (!text.trim()) return;
+    if (!agentKey) {
+      widgetState.messages.push({ sender: 'user', text: text });
+      widgetState.messages.push({ sender: 'agent', text: 'Error: Agent key is not configured for this widget.' });
+      renderMessages();
+      inputField.value = '';
+      return;
+    }
     widgetState.messages.push({ sender: 'user', text: text });
     renderMessages();
     inputField.value = '';
 
-    let toolNotice = 'Hostel AI processing...';
-    const lower = text.toLowerCase();
-    if (lower.includes('food') || lower.includes('dinner') || lower.includes('menu')) {
-      toolNotice = 'Checking today\'s mess menu & timings...';
-    } else if (lower.includes('rule') || lower.includes('visitor') || lower.includes('gate')) {
-      toolNotice = 'Checking hostel rules & policies...';
-    } else if (lower.includes('fan') || lower.includes('maintenance') || lower.includes('repair')) {
-      toolNotice = 'Creating maintenance ticket...';
-    }
-
-    widgetState.messages.push({ sender: 'agent', text: toolNotice, isActivity: true });
+    widgetState.messages.push({ sender: 'agent', text: 'Checking information...', isActivity: true });
     renderMessages();
 
     try {
-      const res = await fetch(`${apiBase}/api/v1/agents/${agentId}/chat`, {
+      const res = await fetch(`${apiBase}/api/v1/agents/${agentKey}/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          organization_id: orgId,
-          property_id: propertyId,
           message: text,
           channel: 'web_widget'
         })
@@ -260,7 +253,7 @@
       widgetState.messages.push({ sender: 'agent', text: data.response || 'Thank you for reaching out.' });
     } catch (e) {
       widgetState.messages.pop();
-      widgetState.messages.push({ sender: 'agent', text: 'Apologies, I encountered a temporary connection issue. Connecting you with hostel office.' });
+      widgetState.messages.push({ sender: 'agent', text: 'Apologies, I encountered a temporary connection issue. Connecting you with our support team.' });
     }
     renderMessages();
   }

@@ -1,26 +1,26 @@
 'use client';
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import Link from 'next/link';
 import { Volume2, Mic, MicOff, Globe, Sparkles, Send, Bot, CheckCircle2, User, PhoneCall, Radio, MessageSquare, AlertCircle } from 'lucide-react';
 import { API_BASE } from '@/lib/api';
 import { VoiceOrb } from '../../../components/ui/voice-orb';
 
 const WELCOME_GREETINGS: Record<string, string> = {
-  English: 'Welcome to Azure Hostel! I am your Hostel AI Assistant. Ask me anything about your hostel, mess menu, timings, rules, or room maintenance.',
-  Malayalam: 'അസൂർ ഹോസ്റ്റലിലേക്ക് സ്വാഗതം! ഞാൻ നിങ്ങളുടെ ഹോസ്റ്റൽ AI അസിസ്റ്റന്റ് ആണ്.',
-  Hindi: 'अज़ूर हॉस्टल में आपका स्वागत है! मैं आपका हॉस्टल AI सहायक हूँ।',
-  Tamil: 'அஸூர் ஹாஸ்டலுக்கு நல்வரவு! நான் உங்கள் ஹாஸ்டல் AI உதவியாளர்.',
-  Telugu: 'అజూర్ హాస్టల్‌కి స్వాగతం! నేను మీ హాస్టల్ AI సహాయకుడిని.',
-  Kannada: 'ಅಜೂರ್ ಹಾಸ್ಟೆಲ್‌ಗೆ ಸುಸ್ವಾಗತ! ನಾನು ನಿಮ್ಮ ಹಾಸ್ಟೆಲ್ AI ಸಹಾಯಕ.'
+  English: 'Welcome! I am your Digital Concierge Assistant. Ask me anything about amenities, dining, timings, or requests.',
+  Malayalam: 'സ്വാഗതം! ഞാൻ നിങ്ങളുടെ ഡിജിറ്റൽ കൺസിയർജ് അസിസ്റ്റന്റ് ആണ്.',
+  Hindi: 'स्वागत है! मैं आपका डिजिटल कंसीयर्ज सहायक हूँ।',
+  Tamil: 'நல்வரவு! நான் உங்கள் டிஜிட்டல் உதவியாளர்.',
+  Telugu: 'స్వాగతం! నేను మీ డిజిటల్ అసిస్టెంట్‌ని.',
+  Kannada: 'ಸುಸ್ವಾಗತ! ನಾನು ನಿಮ್ಮ ಡಿಜಿಟಲ್ ಸಹಾಯಕ.'
 };
 
 const FALLBACK_RESPONSES: Record<string, string> = {
-  English: 'Thank you for asking! Hostel gate and dining operations are fully running today. Dinner is served at 08:00 PM.',
-  Malayalam: 'ചോദിച്ചതിന് നന്ദി! ഹോസ്റ്റൽ ഗേറ്റും മെസ് ഡൈനിംഗും ഇന്ന് തടസ്സമില്ലാതെ പ്രവർത്തിക്കുന്നു.',
-  Hindi: 'पूछने के लिए धन्यवाद! हॉस्टल गेट और मैस डायनिंग आज सामान्य रूप से चालू हैं।',
-  Tamil: 'கேட்டதற்கு நன்றி! ஹாஸ்டல் கேட் மற்றும் മെസ് இயங்குகின்றன.',
-  Telugu: 'అడిగినందుకు ధన్యవాదాలు! హాస్టల్ గేట్ మరియు డైనింగ్ ఈరోజు అందుబాటులో ఉన్నాయి.',
-  Kannada: 'ಕೇಳಿದ್ದಕ್ಕಾಗಿ ಧನ್ಯವಾದಗಳು! ಹಾಸ್ಟೆಲ್ ಗೇಟ್ ಮತ್ತು ಡೈನಿಂಗ್ ಇಂದು ಸರಿಯಾಗಿ ಕಾರ್ಯನಿರ್ವಹಿಸುತ್ತಿದೆ.'
+  English: 'Thank you for asking! Operations and guest dining are fully running today.',
+  Malayalam: 'ചോദിച്ചതിന് നന്ദി! സേവനങ്ങൾ ഇന്ന് തടസ്സമില്ലാതെ പ്രവർത്തിക്കുന്നു.',
+  Hindi: 'पूछने के लिए धन्यवाद! सेवाएँ आज सामान्य रूप से चालू हैं।',
+  Tamil: 'கேட்டதற்கு நன்றி! சேவைகள் இயங்குகின்றன.',
+  Telugu: 'అడిగినందుకు ధన్యవాదాలు! సేవలు అందుబాటులో ఉన్నాయి.',
+  Kannada: 'ಕೇಳಿದ್ದಕ್ಕಾಗಿ ಧನ್ಯವಾದಗಳು! ಸೇವೆಗಳು ಇಂದು ಸರಿಯಾಗಿ ಕಾರ್ಯನಿರ್ವಹಿಸುತ್ತಿವೆ.'
 };
 
 const THINKING_TEXTS: Record<string, string> = {
@@ -138,7 +138,7 @@ const PLACEHOLDERS: Record<string, string> = {
 };
 
 export default function ResidentHostelAssistantPage({ params }: { params?: { agent_id?: string } }) {
-  const agentId = params?.agent_id || 'agt_hostel_01';
+  const agentId = params?.agent_id || '';
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [mode, setMode] = useState<'chat' | 'voice'>('chat');
   const [voiceState, setVoiceState] = useState<'idle' | 'listening' | 'thinking' | 'speaking'>('idle');
@@ -148,21 +148,39 @@ export default function ResidentHostelAssistantPage({ params }: { params?: { age
   const [messages, setMessages] = useState([
     { sender: 'agent', text: WELCOME_GREETINGS.English }
   ]);
-  const [propertyTitle, setPropertyTitle] = useState('Azure Palm Hostel & Campus Residence');
-  const [propertySubtitle, setPropertySubtitle] = useState('Hostel Assistant • Campus Block A');
+  const [propertyTitle, setPropertyTitle] = useState('AI Concierge Assistant');
+  const [propertySubtitle, setPropertySubtitle] = useState('Digital Guest Services');
   const [inputText, setInputText] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [statusNotice, setStatusNotice] = useState<string | null>(null);
 
+  // Load agent details
+  useEffect(() => {
+    async function loadAgentDetails() {
+      if (!agentId) return;
+      try {
+        const res = await fetch(`${API_BASE}/api/v1/agents/${agentId}`);
+        if (res.ok) {
+          const data = await res.json();
+          setPropertyTitle(data.name || 'AI Concierge');
+          if (data.config?.greeting) {
+            setMessages([{ sender: 'agent', text: data.config.greeting }]);
+          }
+        }
+      } catch {}
+    }
+    loadAgentDetails();
+  }, [agentId]);
+
   // Real-Time Server-Sent Events (SSE) Stream Listener for Resident Chat
   React.useEffect(() => {
     try {
-      const eventSource = new EventSource(`${API_BASE}/api/v1/live-updates/events?organization_id=org_azure_group&property_id=prop_azure_palm_resort`);
+      const eventSource = new EventSource(`${API_BASE}/api/v1/live-updates/events?agent_id=${agentId}`);
       eventSource.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
           if (data.type === 'LIVE_UPDATE_CHANGED') {
-            setStatusNotice(`⚡ Live Update: ${data.title || 'New hostel operational update available'}`);
+            setStatusNotice(`⚡ Live Update: ${data.title || 'New operational update available'}`);
             setTimeout(() => setStatusNotice(null), 6000);
           }
         } catch (e) {
@@ -173,7 +191,7 @@ export default function ResidentHostelAssistantPage({ params }: { params?: { age
     } catch (e) {
       console.warn('SSE stream fallback:', e);
     }
-  }, []);
+  }, [agentId]);
 
   const getLanguageTag = (lang: string) => {
     switch (lang) {
@@ -197,8 +215,6 @@ export default function ResidentHostelAssistantPage({ params }: { params?: { age
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          organization_id: 'org_azure_group',
-          property_id: 'prop_azure_palm_resort',
           message: activeLang !== 'English' ? `[Language: ${activeLang}] ${queryText}` : queryText,
           channel: 'voice_session',
           language: activeLang,
@@ -349,8 +365,6 @@ export default function ResidentHostelAssistantPage({ params }: { params?: { age
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          organization_id: 'org_azure_group',
-          property_id: 'prop_azure_palm_resort',
           message: activeLang !== 'English' ? `[Language: ${activeLang}] ${msgToSend}` : msgToSend,
           channel: 'web_widget',
           language: activeLang,
@@ -401,7 +415,7 @@ export default function ResidentHostelAssistantPage({ params }: { params?: { age
           <Link href="/app/dashboard" className="px-3 py-1 rounded-lg text-zinc-600 hover:text-zinc-900 transition-colors">
             🏨 Hostel SaaS Admin
           </Link>
-          <Link href="/guest/agt_hostel_01" className="px-3 py-1 rounded-lg bg-zinc-900 text-white shadow-xs">
+          <Link href={`/guest/${agentId}`} className="px-3 py-1 rounded-lg bg-zinc-900 text-white shadow-xs">
             💬 Resident AI Chat
           </Link>
           <Link href="/platform/dashboard" className="px-3 py-1 rounded-lg text-zinc-600 hover:text-zinc-900 transition-colors">

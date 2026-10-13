@@ -1,8 +1,8 @@
 import React from 'react';
 
 export const metadata = {
-  title: 'Azure Palm Resort - Digital AI Concierge',
-  description: 'Instant 24/7 guest support for room bookings, pool hours, dining, and local activities.',
+  title: 'AI Concierge - Guest Portal',
+  description: 'Instant 24/7 guest support for room bookings, amenities, dining, and local activities.',
 };
 
 export default function GuestLayout({ children }: { children: React.ReactNode }) {

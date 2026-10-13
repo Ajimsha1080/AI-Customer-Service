@@ -1,7 +1,7 @@
 'use client';
-import React, { useState, useEffect } from 'react';
-import { MessageSquare, User, Bot, CheckCircle2, AlertCircle, PhoneCall, Send, ShieldAlert, Tag, UserCheck } from 'lucide-react';
-import { API_BASE, authFetch } from '@/lib/api';
+import React, { useState, useEffect, useRef } from 'react';
+import { MessageSquare, User, Bot, CheckCircle2, AlertCircle, PhoneCall, Send, ShieldAlert, Tag, UserCheck, Loader2 } from 'lucide-react';
+import { API_BASE, authFetch, getCurrentSession } from '@/lib/api';
 
 export default function AppConversationsInboxPage() {
   const [conversations, setConversations] = useState<any[]>([]);
@@ -10,42 +10,101 @@ export default function AppConversationsInboxPage() {
   const [isHumanTakeover, setIsHumanTakeover] = useState(false);
   const [chatInput, setChatInput] = useState('');
   const [loading, setLoading] = useState(true);
+  const [session, setSession] = useState<any>(null);
+  const eventSourceRef = useRef<EventSource | null>(null);
 
-  useEffect(() => {
-    async function loadConversations() {
-      try {
-        const res = await authFetch(`${API_BASE}/api/v1/conversations`);
-        if (res.ok) {
-          const data = await res.json();
-          if (Array.isArray(data) && data.length > 0) {
-            setConversations(data);
+  const loadConversations = async () => {
+    try {
+      const sess = await getCurrentSession();
+      setSession(sess);
+      const res = await authFetch('/api/v1/conversations');
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data)) {
+          setConversations(data);
+          if (data.length > 0 && !selectedConv) {
             setSelectedConv(data[0].id);
             setIsHumanTakeover(data[0].status === 'HUMAN_STAFF_TAKEN_OVER' || data[0].is_human_takeover);
           }
         }
-      } catch (err) {
-        console.error("Error loading conversations:", err);
-      } finally {
-        setLoading(false);
       }
+    } catch (err) {
+      console.error("Error loading conversations:", err);
+    } finally {
+      setLoading(false);
     }
+  };
+
+  useEffect(() => {
     loadConversations();
   }, []);
 
+  const loadMessages = async (convId: string) => {
+    if (!convId) return;
+    try {
+      const res = await authFetch(`/api/v1/conversations/${convId}/messages`);
+      if (res.ok) {
+        const data = await res.json();
+        setMessages(Array.isArray(data) ? data : []);
+      }
+    } catch (err) {
+      console.error("Error loading messages:", err);
+    }
+  };
+
   useEffect(() => {
-    if (!selectedConv) return;
-    async function loadMessages() {
+    if (selectedConv) {
+      loadMessages(selectedConv);
+    }
+  }, [selectedConv]);
+
+  // Connect to realtime SSE stream with ticket
+  useEffect(() => {
+    async function initRealtime() {
       try {
-        const res = await authFetch(`${API_BASE}/api/v1/conversations/${selectedConv}/messages`);
-        if (res.ok) {
-          const data = await res.json();
-          setMessages(Array.isArray(data) ? data : []);
-        }
+        const ticketRes = await authFetch('/api/v1/realtime/ticket', { method: 'POST' });
+        if (!ticketRes.ok) return;
+        const { ticket } = await ticketRes.json();
+
+        const sseUrl = `${API_BASE}/api/v1/live-updates/events?ticket=${ticket}`;
+        const es = new EventSource(sseUrl);
+        eventSourceRef.current = es;
+
+        es.onmessage = (e) => {
+          try {
+            const parsed = JSON.parse(e.data);
+            const data = parsed.data || parsed;
+            if (data.conversation_id === selectedConv) {
+              if (parsed.type === 'STAFF_REPLY' || parsed.type === 'GUEST_MESSAGE' || parsed.type === 'MESSAGE') {
+                setMessages(prev => {
+                  if (prev.some(m => m.id === data.message_id || m.id === data.id)) return prev;
+                  return [...prev, {
+                    id: data.message_id || data.id || `msg_${Date.now()}`,
+                    conversation_id: data.conversation_id,
+                    sender_type: data.sender_type || 'user',
+                    content: data.content,
+                    created_at: new Date().toISOString()
+                  }];
+                });
+              }
+            }
+            if (parsed.type === 'CONVERSATION_CREATED' || parsed.type === 'GUEST_MESSAGE') {
+              loadConversations();
+            }
+          } catch {}
+        };
       } catch (err) {
-        console.error("Error loading messages:", err);
+        console.error("Error establishing realtime inbox listener:", err);
       }
     }
-    loadMessages();
+
+    initRealtime();
+
+    return () => {
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+      }
+    };
   }, [selectedConv]);
 
   const activeConv = conversations.find(c => c.id === selectedConv) || (conversations.length > 0 ? conversations[0] : null);
@@ -53,7 +112,7 @@ export default function AppConversationsInboxPage() {
   const handleTakeover = async () => {
     if (!activeConv) return;
     try {
-      const res = await authFetch(`${API_BASE}/api/v1/conversations/${activeConv.id}/takeover`, {
+      const res = await authFetch(`/api/v1/conversations/${activeConv.id}/takeover`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ reason: 'Staff Takeover' })
@@ -72,14 +131,17 @@ export default function AppConversationsInboxPage() {
     const text = chatInput;
     setChatInput('');
     try {
-      const res = await authFetch(`${API_BASE}/api/v1/conversations/${activeConv.id}/messages`, {
+      const res = await authFetch(`/api/v1/conversations/${activeConv.id}/messages`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content: text })
       });
       if (res.ok) {
         const newMsg = await res.json();
-        setMessages(prev => [...prev, newMsg]);
+        setMessages(prev => {
+          if (prev.some(m => m.id === newMsg.id)) return prev;
+          return [...prev, newMsg];
+        });
       }
     } catch (err) {
       console.error("Error sending staff message:", err);
@@ -91,7 +153,7 @@ export default function AppConversationsInboxPage() {
       {/* LEFT COLUMN: Conversation List */}
       <div className="lg:col-span-3 bg-white border border-zinc-200 rounded-2xl flex flex-col overflow-hidden shadow-xs">
         <div className="p-4 border-b border-zinc-200 bg-zinc-50 flex items-center justify-between">
-          <h2 className="font-bold text-sm text-zinc-900">Staff Intercom & Human Takeover</h2>
+          <h2 className="font-bold text-sm text-zinc-900">Staff Inbox</h2>
           <span className="yc-badge">
             {conversations.length} Active
           </span>
@@ -99,41 +161,44 @@ export default function AppConversationsInboxPage() {
 
         <div className="flex-1 overflow-y-auto divide-y divide-zinc-200">
           {loading ? (
-            <div className="p-4 text-center text-xs text-zinc-400">Loading inbox...</div>
+            <div className="p-8 flex justify-center text-zinc-400">
+              <Loader2 className="w-5 h-5 animate-spin" />
+            </div>
           ) : conversations.length === 0 ? (
-            <div className="p-4 text-center text-xs text-zinc-500">No active conversations found.</div>
+            <div className="p-8 text-center text-xs text-zinc-400">
+              No active conversations yet. Guest chats will appear here in real-time.
+            </div>
           ) : (
-            conversations.map((c) => (
-              <div
-                key={c.id}
-                onClick={() => {
-                  setSelectedConv(c.id);
-                  setIsHumanTakeover(c.status === 'HUMAN_STAFF_TAKEN_OVER' || c.is_human_takeover);
-                }}
-                className={`p-4 cursor-pointer transition-all ${
-                  selectedConv === c.id ? 'bg-zinc-100 border-l-4 border-zinc-900' : 'hover:bg-zinc-50'
-                }`}
-              >
-                <div className="flex items-center justify-between mb-1">
-                  <span className="font-bold text-xs text-zinc-900">{c.guest || 'Guest'}</span>
-                  <span className="text-[10px] text-zinc-400 font-mono">{c.time || 'Live'}</span>
+            conversations.map((c) => {
+              const isSelected = c.id === selectedConv;
+              return (
+                <div 
+                  key={c.id} 
+                  onClick={() => {
+                    setSelectedConv(c.id);
+                    setIsHumanTakeover(c.status === 'HUMAN_STAFF_TAKEN_OVER' || c.is_human_takeover);
+                  }}
+                  className={`p-4 cursor-pointer transition-colors ${
+                    isSelected ? 'bg-zinc-100 border-l-4 border-zinc-900' : 'hover:bg-zinc-50'
+                  }`}
+                >
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="font-bold text-xs text-zinc-900 truncate">
+                      {c.guest || 'Guest'}
+                    </span>
+                    <span className="text-[10px] text-zinc-400 font-mono">
+                      {c.status === 'HUMAN_STAFF_TAKEN_OVER' ? 'HUMAN' : 'AI'}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-zinc-500 truncate font-mono">{c.id}</p>
                 </div>
-                <p className="text-[11px] text-zinc-600 line-clamp-1 mb-2">{c.last_message || 'Guest conversation active'}</p>
-                <div className="flex items-center justify-between text-[10px]">
-                  <span className="text-zinc-500 font-mono">{c.agent_id}</span>
-                  <span className={`px-2 py-0.5 rounded font-bold ${
-                    c.status === 'HUMAN_STAFF_TAKEN_OVER' ? 'bg-amber-100 text-amber-800 border border-amber-200' : 'yc-badge-emerald'
-                  }`}>
-                    {c.status || 'AI Active'}
-                  </span>
-                </div>
-              </div>
-            ))
+              );
+            })
           )}
         </div>
       </div>
 
-      {/* CENTER COLUMN: Intercom-Grade Active Chat Feed */}
+      {/* CENTER COLUMN: Active Chat Feed */}
       <div className="lg:col-span-6 bg-white border border-zinc-200 rounded-2xl flex flex-col justify-between overflow-hidden shadow-xs">
         {activeConv ? (
           <>
@@ -144,8 +209,8 @@ export default function AppConversationsInboxPage() {
                   {(activeConv.guest || 'G').charAt(0)}
                 </div>
                 <div>
-                  <h3 className="font-bold text-sm text-zinc-900">{activeConv.guest || 'Valued Guest'}</h3>
-                  <p className="text-[10px] text-zinc-500 font-medium">{activeConv.id}</p>
+                  <h3 className="font-bold text-sm text-zinc-900">{activeConv.guest || 'Guest'}</h3>
+                  <p className="text-[10px] text-zinc-500 font-medium font-mono">{activeConv.id}</p>
                 </div>
               </div>
 
@@ -158,7 +223,7 @@ export default function AppConversationsInboxPage() {
                 }`}
               >
                 <UserCheck className="w-3.5 h-3.5" />
-                {isHumanTakeover ? 'Human Staff Controlling' : 'Take Over Conversation'}
+                {isHumanTakeover ? 'Staff Controlling' : 'Take Over Chat'}
               </button>
             </div>
 
@@ -196,6 +261,7 @@ export default function AppConversationsInboxPage() {
                 type="text"
                 value={chatInput}
                 onChange={(e) => setChatInput(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') handleSendMessage(); }}
                 placeholder={isHumanTakeover ? "Reply directly to guest as staff..." : "Agent auto-pilot active. Take over to type..."}
                 className="flex-1 bg-zinc-50 border border-zinc-200 rounded-xl px-4 py-2.5 text-xs text-zinc-900 focus:outline-none focus:border-zinc-400"
               />
@@ -208,7 +274,9 @@ export default function AppConversationsInboxPage() {
             </div>
           </>
         ) : (
-          <div className="flex items-center justify-center h-full text-xs text-zinc-400">Select a conversation from the left inbox to view.</div>
+          <div className="flex items-center justify-center h-full text-xs text-zinc-400">
+            Select a conversation from the left inbox to view.
+          </div>
         )}
       </div>
 
@@ -223,7 +291,7 @@ export default function AppConversationsInboxPage() {
             <div className="space-y-4 text-zinc-700">
               <div>
                 <span className="text-zinc-500 block text-[10px] font-mono uppercase">GUEST NAME</span>
-                <span className="text-zinc-900 font-bold">{activeConv.guest || 'Valued Guest'}</span>
+                <span className="text-zinc-900 font-bold">{activeConv.guest || 'Guest'}</span>
               </div>
 
               <div>
@@ -232,22 +300,13 @@ export default function AppConversationsInboxPage() {
               </div>
 
               <div>
-                <span className="text-zinc-500 block text-[10px] font-mono uppercase">AI AGENT IN CHARGE</span>
-                <span className="text-zinc-900 font-medium">{activeConv.agent_id}</span>
+                <span className="text-zinc-500 block text-[10px] font-mono uppercase">AI AGENT</span>
+                <span className="text-zinc-900 font-medium font-mono">{activeConv.agent_id}</span>
               </div>
             </div>
           ) : (
             <div className="text-zinc-400 text-xs">No profile selected.</div>
           )}
-        </div>
-
-        <div className="border-t border-zinc-200 pt-4 space-y-2">
-          <button className="yc-btn-secondary w-full py-2 text-xs">
-            View Reservation Details
-          </button>
-          <button className="w-full py-2 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 text-xs font-bold rounded-xl border border-emerald-200 transition-colors">
-            ✓ Mark Conversation Resolved
-          </button>
         </div>
       </div>
     </div>

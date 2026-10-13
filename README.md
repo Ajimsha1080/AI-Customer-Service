@@ -12,7 +12,7 @@ Hospitality businesses subscribe to the platform to deploy custom AI digital con
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                             CUSTOMER WORKFLOW                               │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│ 1. Create Account & Property   ➔  "Azure Palm Resort & Spa"                 │
+│ 1. Create Account & Property   ➔  "Grand Horizon Resort & Spa"                 │
 │ 2. Upload Property Knowledge   ➔  Upload Guest Policy PDF & Restaurant Menu │
 │ 3. Connect Live Data Tools     ➔  Enable Room Vacancy & Pool Status Tools   │
 │ 4. Configure & Test Agent      ➔  Select Luxury Tone & Test Voice Orb       │

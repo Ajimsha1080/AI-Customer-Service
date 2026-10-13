@@ -32,16 +32,33 @@ if settings.SENTRY_DSN:
         from sentry_sdk.integrations.fastapi import FastApiIntegration
         sentry_sdk.init(
             dsn=settings.SENTRY_DSN,
-            traces_sample_rate=1.0,
+            traces_sample_rate=settings.SENTRY_TRACES_SAMPLE_RATE,
             integrations=[FastApiIntegration()]
         )
     except Exception as e:
         logging.warning(f"Failed to initialize Sentry SDK: {e}")
 
+from contextlib import asynccontextmanager
+from services.realtime.broadcaster import realtime_hub
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    if settings.is_production:
+        from services.database.session import AsyncSessionLocal
+        from sqlalchemy import text
+        async with AsyncSessionLocal() as session:
+            res = await session.execute(text("SELECT extname FROM pg_extension WHERE extname = 'vector';"))
+            if not res.scalar():
+                raise RuntimeError("CRITICAL: pgvector extension is required in production database!")
+    await realtime_hub.start_redis_subscriber()
+    yield
+    await realtime_hub.stop_redis_subscriber()
+
 app = FastAPI(
     title=settings.PROJECT_NAME,
     version=settings.VERSION,
-    description="Multi-Tenant Autonomous Hospitality Agent Cloud Platform API (Argon2 Auth, Tenant Scoping, PGVector RAG, LiteLLM Agent Loop, Billing Enforcement)."
+    description="Multi-Tenant Autonomous Hospitality Agent Cloud Platform API (Argon2 Auth, Tenant Scoping, PGVector RAG, LiteLLM Agent Loop, Billing Enforcement).",
+    lifespan=lifespan
 )
 
 app.state.limiter = limiter
@@ -61,9 +78,15 @@ app.add_middleware(
 )
 
 # --- REQUEST ID & STRUCTURED LOGGING MIDDLEWARE ---
+import re
+
 @app.middleware("http")
 async def request_id_and_logging_middleware(request: Request, call_next):
-    request_id = request.headers.get("X-Request-ID") or f"req_{uuid.uuid4().hex[:12]}"
+    raw_request_id = request.headers.get("X-Request-ID", "").strip()
+    if raw_request_id and re.match(r"^[a-zA-Z0-9_\-]{1,64}$", raw_request_id):
+        request_id = raw_request_id
+    else:
+        request_id = f"req_{uuid.uuid4().hex[:12]}"
     request.state.request_id = request_id
 
     start_time = time.time()

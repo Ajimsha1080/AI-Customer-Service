@@ -12,6 +12,7 @@ from services.database.models import (
     RatePlan, Reservation, SupportTicket, Resident, UserRole
 )
 from apps.api.auth import get_current_user, verify_tenant_access, require_role
+from services.realtime.broadcaster import realtime_hub
 
 router = APIRouter(tags=["Hospitality Data Plane"])
 

@@ -48,12 +48,44 @@ class RefreshTokenRequest(BaseModel):
     refresh_token: str
 
 class LogoutRequest(BaseModel):
-    refresh_token: str
+    refresh_token: Optional[str] = None
+
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str
+
+class VerifyEmailRequest(BaseModel):
+    token: str
 
 class GoogleAuthCallbackRequest(BaseModel):
     code: str
     state: Optional[str] = None
     redirect_uri: Optional[str] = "http://localhost:3002/auth/callback/google"
+
+def set_auth_cookies(response: Response, access_token: str, refresh_token: str) -> None:
+    is_secure = settings.COOKIE_SECURE or (settings.ENVIRONMENT.lower() in ("production", "prod"))
+    cookie_kwargs = {
+        "httponly": True,
+        "samesite": settings.COOKIE_SAMESITE,
+        "secure": is_secure,
+    }
+    if settings.COOKIE_DOMAIN:
+        cookie_kwargs["domain"] = settings.COOKIE_DOMAIN
+
+    response.set_cookie(key="access_token", value=access_token, max_age=1800, **cookie_kwargs)
+    response.set_cookie(key="session_token", value=access_token, max_age=1800, **cookie_kwargs)
+    response.set_cookie(key="refresh_token", value=refresh_token, max_age=7*86400, **cookie_kwargs)
+
+def clear_auth_cookies(response: Response) -> None:
+    cookie_kwargs = {}
+    if settings.COOKIE_DOMAIN:
+        cookie_kwargs["domain"] = settings.COOKIE_DOMAIN
+    response.delete_cookie(key="access_token", **cookie_kwargs)
+    response.delete_cookie(key="session_token", **cookie_kwargs)
+    response.delete_cookie(key="refresh_token", **cookie_kwargs)
 
 @router.post("/register")
 @limiter.limit("10/minute")
@@ -110,9 +142,7 @@ async def register(request: Request, req: RegisterRequest, response: Response, d
     access_token = create_access_token({"sub": user.id, "org_id": user.organization_id, "role": user.role.value if hasattr(user.role, "value") else str(user.role)})
     refresh_token = create_refresh_token({"sub": user.id})
 
-    response.set_cookie(key="access_token", value=access_token, httponly=True, samesite="lax", max_age=1800)
-    response.set_cookie(key="session_token", value=access_token, httponly=True, samesite="lax", max_age=1800)
-    response.set_cookie(key="refresh_token", value=refresh_token, httponly=True, samesite="lax", max_age=7*86400)
+    set_auth_cookies(response, access_token, refresh_token)
 
     return {
         "access_token": access_token,
@@ -193,9 +223,7 @@ async def accept_invitation(req: AcceptInvitationRequest, response: Response, db
     access_token = create_access_token({"sub": user.id, "org_id": user.organization_id, "role": user.role.value if hasattr(user.role, "value") else str(user.role)})
     refresh_token = create_refresh_token({"sub": user.id})
 
-    response.set_cookie(key="access_token", value=access_token, httponly=True, samesite="lax", max_age=1800)
-    response.set_cookie(key="session_token", value=access_token, httponly=True, samesite="lax", max_age=1800)
-    response.set_cookie(key="refresh_token", value=refresh_token, httponly=True, samesite="lax", max_age=7*86400)
+    set_auth_cookies(response, access_token, refresh_token)
 
     return {
         "access_token": access_token,
@@ -244,9 +272,7 @@ async def login(request: Request, req: LoginRequest, response: Response, db: Asy
     access_token = create_access_token({"sub": user.id, "org_id": user.organization_id, "role": user.role.value if hasattr(user.role, "value") else str(user.role)})
     refresh_token = create_refresh_token({"sub": user.id})
 
-    response.set_cookie(key="access_token", value=access_token, httponly=True, samesite="lax", max_age=1800)
-    response.set_cookie(key="session_token", value=access_token, httponly=True, samesite="lax", max_age=1800)
-    response.set_cookie(key="refresh_token", value=refresh_token, httponly=True, samesite="lax", max_age=7*86400)
+    set_auth_cookies(response, access_token, refresh_token)
 
     return {
         "access_token": access_token,
@@ -376,10 +402,9 @@ async def google_auth_callback(req: GoogleAuthCallbackRequest, db: AsyncSession 
 
 @router.post("/logout")
 async def logout(req: LogoutRequest, response: Response, db: AsyncSession = Depends(get_db)):
-    await revoke_refresh_token(req.refresh_token, db=db)
-    response.delete_cookie("access_token")
-    response.delete_cookie("session_token")
-    response.delete_cookie("refresh_token")
+    if req.refresh_token:
+        await revoke_refresh_token(req.refresh_token, db=db)
+    clear_auth_cookies(response)
     return {"message": "Successfully logged out and token invalidated."}
 
 @router.post("/refresh")
@@ -416,3 +441,78 @@ async def get_me(current_user: User = Depends(get_current_user)):
         "role": role_val,
         "organization_id": current_user.organization_id
     }
+
+@router.post("/forgot-password")
+@limiter.limit("5/minute")
+async def forgot_password(request: Request, req: ForgotPasswordRequest, db: AsyncSession = Depends(get_db)):
+    """Generates a secure password reset token (timing-safe response)."""
+    stmt = select(User).where(User.email == req.email)
+    res = await db.execute(stmt)
+    user = res.scalar_one_or_none()
+
+    reset_token = None
+    if user and user.is_active:
+        reset_token = create_access_token(
+            {"sub": user.id, "email": user.email, "scope": "password_reset"},
+            expires_delta=timedelta(hours=1)
+        )
+        logger.info(f"Password reset token issued for user {user.email}")
+
+    return {
+        "message": "If this email exists in our system, a password reset link has been dispatched.",
+        "debug_token": reset_token if settings.DEBUG else None
+    }
+
+@router.post("/reset-password")
+@limiter.limit("5/minute")
+async def reset_password(request: Request, req: ResetPasswordRequest, db: AsyncSession = Depends(get_db)):
+    """Validates reset token and updates account password with Argon2 hash."""
+    from jose import jwt, JWTError
+    try:
+        payload = jwt.decode(req.token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
+        if payload.get("scope") != "password_reset":
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid token scope")
+        user_id = payload.get("sub")
+    except JWTError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired password reset token")
+
+    stmt = select(User).where(User.id == user_id)
+    res = await db.execute(stmt)
+    user = res.scalar_one_or_none()
+    if not user or not user.is_active:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    user.hashed_password = hash_password(req.new_password)
+    await db.flush()
+    await record_audit_log_async(
+        org_id=user.organization_id,
+        user_id=user.id,
+        action="PASSWORD_RESET_COMPLETED",
+        target_type="user",
+        target_id=user.id,
+        details={"email": user.email},
+        db=db
+    )
+    return {"message": "Password successfully reset. Please log in with your new password."}
+
+@router.post("/verify-email")
+async def verify_email(req: VerifyEmailRequest, db: AsyncSession = Depends(get_db)):
+    """Verifies user email token."""
+    from jose import jwt, JWTError
+    try:
+        payload = jwt.decode(req.token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
+        if payload.get("scope") != "email_verification":
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid token scope")
+        user_id = payload.get("sub")
+    except JWTError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired verification token")
+
+    stmt = select(User).where(User.id == user_id)
+    res = await db.execute(stmt)
+    user = res.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    user.is_active = True
+    await db.flush()
+    return {"message": "Email address verified successfully. You may now log in."}

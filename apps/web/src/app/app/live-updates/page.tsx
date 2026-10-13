@@ -109,24 +109,40 @@ export default function AppLiveUpdatesPage() {
 
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
-  // Real-Time Server-Sent Events (SSE) Stream Listener
+  // Real-Time Server-Sent Events (SSE) Stream Listener with Ticket
   useEffect(() => {
-    try {
-      const eventSource = new EventSource(`${API_BASE}/api/v1/live-updates/events?organization_id=org_azure_group&property_id=prop_azure_palm_resort`);
-      eventSource.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          if (data.type === 'LIVE_UPDATE_CHANGED') {
-            showToast(`⚡ Real-Time Stream Event: ${data.title || 'Live Information updated across clients'}`);
+    let es: EventSource | null = null;
+    async function initSSE() {
+      try {
+        const ticketRes = await fetch(`${API_BASE}/api/v1/realtime/ticket`, {
+          method: 'POST',
+          credentials: 'include',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(typeof window !== 'undefined' && localStorage.getItem('token') ? { 'Authorization': `Bearer ${localStorage.getItem('token')}` } : {})
           }
-        } catch (e) {
-          console.warn('SSE parse error:', e);
-        }
-      };
-      return () => eventSource.close();
-    } catch (e) {
-      console.warn('SSE stream listener fallback:', e);
+        });
+        if (!ticketRes.ok) return;
+        const { ticket } = await ticketRes.json();
+        es = new EventSource(`${API_BASE}/api/v1/live-updates/events?ticket=${ticket}`);
+        es.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            if (data.type === 'LIVE_UPDATE_CHANGED') {
+              showToast(`⚡ Real-Time Stream Event: ${data.title || 'Live Information updated across clients'}`);
+            }
+          } catch (e) {
+            console.warn('SSE parse error:', e);
+          }
+        };
+      } catch (e) {
+        console.warn('SSE stream listener fallback:', e);
+      }
     }
+    initSSE();
+    return () => {
+      if (es) es.close();
+    };
   }, []);
 
   const showToast = (msg: string) => {
@@ -226,24 +242,47 @@ export default function AppLiveUpdatesPage() {
   };
 
   const handleTestConnection = async (id: string) => {
-    showToast('Testing ERP connection handshake...');
+    showToast('Testing integration connection handshake...');
     try {
-      await fetch(`${API_BASE}/api/v1/live-updates/integrations/${id}/test`, { method: 'POST' });
-      showToast('✓ Connection Verified! Hostel ERP endpoint reachable with 38ms latency.');
-    } catch (e) {
-      showToast('✓ Connection Verified! Hostel ERP endpoint reachable with 38ms latency.');
+      const res = await fetch(`${API_BASE}/api/v1/live-updates/integrations/${id}/test`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(typeof window !== 'undefined' && localStorage.getItem('token') ? { 'Authorization': `Bearer ${localStorage.getItem('token')}` } : {})
+        }
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        showToast(`✓ Connection Verified! Endpoint reachable with ${data.latency_ms || 30}ms latency.`);
+      } else {
+        showToast(`Connection Notice: ${data.message || data.detail || 'Test completed'}`);
+      }
+    } catch (e: any) {
+      showToast(`Connection error: ${e.message || 'Could not reach endpoint'}`);
     }
   };
 
   const handleSyncNow = async (id: string) => {
-    showToast('Syncing latest live operational data from Hostel ERP...');
+    showToast('Syncing latest live data from integration source...');
     try {
-      await fetch(`${API_BASE}/api/v1/live-updates/integrations/${id}/sync`, { method: 'POST' });
-      setIntegrations(prev => prev.map(s => s.id === id ? { ...s, last_synced_at: 'Just now', status: 'CONNECTED' } : s));
-      showToast('✓ Real-Time Sync Complete! Hostel AI Agent updated.');
-    } catch (e) {
-      setIntegrations(prev => prev.map(s => s.id === id ? { ...s, last_synced_at: 'Just now', status: 'CONNECTED' } : s));
-      showToast('✓ Real-Time Sync Complete! Hostel AI Agent updated.');
+      const res = await fetch(`${API_BASE}/api/v1/live-updates/integrations/${id}/sync`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(typeof window !== 'undefined' && localStorage.getItem('token') ? { 'Authorization': `Bearer ${localStorage.getItem('token')}` } : {})
+        }
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setIntegrations(prev => prev.map(s => s.id === id ? { ...s, last_synced_at: data.last_synced_at ? 'Just now' : s.last_synced_at, status: data.status || 'CONNECTED' } : s));
+        showToast('✓ Real-Time Sync Complete!');
+      } else {
+        showToast(`Sync Notice: ${data.detail || 'Sync completed'}`);
+      }
+    } catch (e: any) {
+      showToast(`Sync error: ${e.message || 'Error syncing data'}`);
     }
   };
 

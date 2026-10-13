@@ -1,0 +1,64 @@
+replicaCount: 3
+
+image:
+  repository: ghcr.io/ajimsha1080/ai-customer-service-api
+  pullPolicy: IfNotPresent
+  # Overridden by CI git SHA tag
+  tag: "latest"
+
+webImage:
+  repository: ghcr.io/ajimsha1080/ai-customer-service-web
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: "hospitality-agent"
+
+service:
+  type: ClusterIP
+  port: 8000
+  webPort: 3000
+
+ingress:
+  enabled: true
+  className: "nginx"
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+  hosts:
+    - host: api.hospitality.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+          port: 8000
+    - host: app.hospitality.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+          port: 3000
+  tls:
+    - secretName: hospitality-agent-tls
+      hosts:
+        - api.hospitality.example.com
+        - app.hospitality.example.com
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: 1000m
+    memory: 2Gi
+
+podDisruptionBudget:
+  minAvailable: 2
+
+migrationJob:
+  enabled: true
+
+env:
+  ENVIRONMENT: "production"
+  PORT: "8000"

@@ -1,30 +1,77 @@
 'use client';
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { 
-  Building2, Bot, BookOpen, Radio, BarChart3, CreditCard, Home, MessageSquare, ChevronLeft, ChevronRight, Search, Bell, Sparkles, Users 
+  Building2, Bot, BookOpen, Radio, BarChart3, CreditCard, Home, MessageSquare, ChevronLeft, ChevronRight, Search, Bell, Sparkles, Users, LogOut, Inbox, BedDouble 
 } from 'lucide-react';
 import { CommandMenu } from '../../components/ui/command-menu';
+import { getCurrentSession, logout, authFetch, API_BASE } from '@/lib/api';
 
 export default function OrganizationAppLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const [isCollapsed, setIsCollapsed] = useState(false);
+  const [user, setUser] = useState<any>(null);
+  const [org, setOrg] = useState<any>(null);
+  const [activeAgentId, setActiveAgentId] = useState<string | null>(null);
+
+  useEffect(() => {
+    async function loadSession() {
+      const session = await getCurrentSession();
+      if (session) {
+        setUser(session);
+        if (session.organization_id) {
+          try {
+            const orgRes = await authFetch(`/api/v1/organizations/${session.organization_id}`);
+            if (orgRes.ok) {
+              const orgData = await orgRes.json();
+              setOrg(orgData);
+            }
+          } catch {}
+          try {
+            const agentRes = await authFetch(`/api/v1/agents?organization_id=${session.organization_id}`);
+            if (agentRes.ok) {
+              const agents = await agentRes.json();
+              if (Array.isArray(agents) && agents.length > 0) {
+                setActiveAgentId(agents[0].id);
+              }
+            }
+          } catch {}
+        }
+      }
+    }
+    loadSession();
+  }, []);
 
   const navItems = [
     { name: 'Dashboard', href: '/app/dashboard', icon: Home },
-    { name: 'AI Assistant', href: '/app/agents', icon: Bot },
-    { name: 'Knowledge', href: '/app/knowledge', icon: BookOpen },
-    { name: 'Live Information', href: '/app/live-updates', icon: Radio },
+    { name: 'Staff Inbox', href: '/app/conversations', icon: Inbox },
+    { name: 'Support Tickets', href: '/app/requests', icon: MessageSquare },
+    { name: 'Properties & Rooms', href: '/app/properties', icon: BedDouble },
+    { name: 'Guests & Residents', href: '/app/residents', icon: Users },
+    { name: 'AI Concierge', href: '/app/agents', icon: Bot },
+    { name: 'Knowledge Base', href: '/app/knowledge', icon: BookOpen },
+    { name: 'Live Operations', href: '/app/live-updates', icon: Radio },
+    { name: 'Analytics & Usage', href: '/app/analytics', icon: BarChart3 },
+    { name: 'Billing & Plan', href: '/app/billing', icon: CreditCard },
     { name: 'Settings', href: '/app/settings', icon: Sparkles },
   ];
+
+  const orgInitial = (org?.name || user?.organization_name || user?.organization_id || 'H').charAt(0).toUpperCase();
+  const orgDisplayName = org?.name || user?.organization_name || 'Hospitality Workspace';
+  const userInitials = (user?.full_name || user?.email || 'AD')
+    .split(' ')
+    .map((n: string) => n[0])
+    .join('')
+    .slice(0, 2)
+    .toUpperCase();
 
   return (
     <div className="min-h-screen bg-white text-zinc-900 flex font-sans selection:bg-zinc-200">
       <CommandMenu />
 
       {/* Sidebar */}
-      <aside className={`${isCollapsed ? 'w-16' : 'w-60'} border-r border-zinc-200 bg-white flex flex-col justify-between transition-all duration-200 relative shrink-0`}>
+      <aside className={`${isCollapsed ? 'w-16' : 'w-64'} border-r border-zinc-200 bg-white flex flex-col justify-between transition-all duration-200 relative shrink-0`}>
         <div>
           {/* Collapse Toggle Button */}
           <button
@@ -37,12 +84,12 @@ export default function OrganizationAppLayout({ children }: { children: React.Re
           {/* Organization & Tenant Selector */}
           <div className="p-4 border-b border-zinc-200 flex items-center gap-3">
             <div className="w-7 h-7 rounded-lg bg-zinc-900 text-white font-bold flex items-center justify-center text-xs shadow-xs shrink-0">
-              A
+              {orgInitial}
             </div>
             {!isCollapsed && (
               <div className="overflow-hidden">
-                <h2 className="font-bold text-xs text-zinc-900 truncate">Azure Hostel Group</h2>
-                <span className="text-[10px] text-zinc-500 font-medium truncate block">Azure Palm Hostel</span>
+                <h2 className="font-bold text-xs text-zinc-900 truncate">{orgDisplayName}</h2>
+                <span className="text-[10px] text-zinc-500 font-medium truncate block">{user?.role || 'Member'}</span>
               </div>
             )}
           </div>
@@ -75,15 +122,24 @@ export default function OrganizationAppLayout({ children }: { children: React.Re
         <div className="p-3 border-t border-zinc-200 flex items-center justify-between">
           <div className="flex items-center gap-2.5 overflow-hidden">
             <div className="w-7 h-7 rounded-full bg-zinc-100 border border-zinc-300 flex items-center justify-center text-[10px] font-bold text-zinc-700 shrink-0">
-              AD
+              {userInitials}
             </div>
             {!isCollapsed && (
               <div className="overflow-hidden">
-                <p className="text-xs font-semibold text-zinc-900 truncate">Org Admin</p>
-                <p className="text-[10px] text-zinc-500 truncate">admin@azurepalm.com</p>
+                <p className="text-xs font-semibold text-zinc-900 truncate">{user?.full_name || 'Logged In User'}</p>
+                <p className="text-[10px] text-zinc-500 truncate">{user?.email || 'user@example.com'}</p>
               </div>
             )}
           </div>
+          {!isCollapsed && (
+            <button
+              onClick={() => logout()}
+              title="Sign Out"
+              className="p-1.5 rounded-lg text-zinc-400 hover:text-rose-600 hover:bg-rose-50 transition"
+            >
+              <LogOut className="w-4 h-4" />
+            </button>
+          )}
         </div>
       </aside>
 
@@ -109,7 +165,7 @@ export default function OrganizationAppLayout({ children }: { children: React.Re
               </span>
             </div>
             <span className="yc-badge-emerald">
-              ● Live Shared Runtime
+              ● Live Multi-Tenant Cloud
             </span>
           </div>
 
@@ -121,24 +177,34 @@ export default function OrganizationAppLayout({ children }: { children: React.Re
                 pathname.startsWith('/app') ? 'bg-zinc-900 text-white shadow-xs' : 'text-zinc-600 hover:text-zinc-900'
               }`}
             >
-              🏨 Hostel SaaS Admin
+              🏨 SaaS Workspace
             </Link>
-            <Link 
-              href="/guest/agt_hostel_01" 
-              className={`px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1.5 ${
-                pathname.startsWith('/guest') ? 'bg-zinc-900 text-white shadow-xs' : 'text-zinc-600 hover:text-zinc-900'
-              }`}
-            >
-              💬 Resident AI Chat
-            </Link>
-            <Link 
-              href="/platform/dashboard" 
-              className={`px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1.5 ${
-                pathname.startsWith('/platform') ? 'bg-zinc-900 text-white shadow-xs' : 'text-zinc-600 hover:text-zinc-900'
-              }`}
-            >
-              🛡️ Super Admin
-            </Link>
+            {activeAgentId ? (
+              <Link 
+                href={`/guest/${activeAgentId}`} 
+                target="_blank"
+                className="px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1.5 text-zinc-600 hover:text-zinc-900"
+              >
+                💬 Guest AI Portal
+              </Link>
+            ) : (
+              <Link 
+                href="/app/agents" 
+                className="px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1.5 text-zinc-600 hover:text-zinc-900"
+              >
+                💬 Guest AI Portal
+              </Link>
+            )}
+            {user?.role === 'SUPER_ADMIN' && (
+              <Link 
+                href="/platform/dashboard" 
+                className={`px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1.5 ${
+                  pathname.startsWith('/platform') ? 'bg-zinc-900 text-white shadow-xs' : 'text-zinc-600 hover:text-zinc-900'
+                }`}
+              >
+                🛡️ Super Admin
+              </Link>
+            )}
           </div>
         </header>
 

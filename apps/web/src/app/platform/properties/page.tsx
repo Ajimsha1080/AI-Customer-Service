@@ -1,6 +1,6 @@
 'use client';
 import React, { useState, useEffect } from 'react';
-import { API_BASE } from '@/lib/api';
+import { API_BASE, authFetch } from '@/lib/api';
 
 export default function PlatformPropertiesPage() {
   const [properties, setProperties] = useState<any[]>([]);
@@ -9,7 +9,7 @@ export default function PlatformPropertiesPage() {
   useEffect(() => {
     async function loadGlobalProperties() {
       try {
-        const res = await fetch(`${API_BASE}/api/v1/properties?organization_id=org_azure_group`);
+        const res = await authFetch('/api/v1/properties');
         if (res.ok) {
           const data = await res.json();
           setProperties(data);

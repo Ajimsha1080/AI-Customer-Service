@@ -39,12 +39,27 @@ services:
     restart: always
     ports:
       - "8000:8000"
-    env_file:
-      - .env.production
     environment:
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/hospitality_agent_cloud
       - REDIS_URL=redis://redis:6379/0
       - SARVAM_API_KEY=${SARVAM_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.api
+    container_name: hospitality_worker
+    restart: always
+    command: ["python", "-m", "services.tasks.worker"]
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/hospitality_agent_cloud
+      - REDIS_URL=redis://redis:6379/0
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
     depends_on:
       postgres:
@@ -62,6 +77,7 @@ services:
       - "3000:3000"
     environment:
       - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - API_BASE=http://localhost:8000
     depends_on:
       - api
 

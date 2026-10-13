@@ -19,8 +19,8 @@ class PlanUpgradeRequest(BaseModel):
 
 class CheckoutSessionRequest(BaseModel):
     plan_name: str
-    success_url: Optional[str] = "http://localhost:3001/app/billing?session=success"
-    cancel_url: Optional[str] = "http://localhost:3001/app/billing?session=cancel"
+    success_url: Optional[str] = "http://localhost:3000/app/billing?session=success"
+    cancel_url: Optional[str] = "http://localhost:3000/app/billing?session=cancel"
 
 @router.get("/api/v1/billing/subscription")
 async def get_subscription_status(
@@ -37,7 +37,7 @@ async def get_subscription_status(
     }
 
 class CustomerPortalRequest(BaseModel):
-    return_url: Optional[str] = "http://localhost:3002/app/billing"
+    return_url: Optional[str] = "http://localhost:3000/app/billing"
 
 @router.post("/api/v1/billing/subscription/upgrade")
 async def upgrade_subscription_plan(
@@ -121,20 +121,80 @@ async def get_usage(
 @router.get("/api/v1/analytics", tags=["Platform & Agent Analytics"])
 async def get_analytics(
     organization_id: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     org_id = verify_tenant_access(current_user, organization_id)
-    convs_count = (await db.execute(select(func.count(Conversation.id)).where(Conversation.organization_id == org_id))).scalar() or 0
-    events_count = (await db.execute(select(func.count(UsageEvent.id)).where(UsageEvent.organization_id == org_id))).scalar() or 0
+    from datetime import datetime
+    from services.database.models import Message, ConversationStatus
+
+    conv_query = select(Conversation).where(Conversation.organization_id == org_id)
+    usage_query = select(UsageEvent).where(UsageEvent.organization_id == org_id)
+
+    if start_date:
+        try:
+            s_dt = datetime.fromisoformat(start_date.replace("Z", "+00:00"))
+            conv_query = conv_query.where(Conversation.created_at >= s_dt)
+            usage_query = usage_query.where(UsageEvent.created_at >= s_dt)
+        except Exception:
+            pass
+    if end_date:
+        try:
+            e_dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+            conv_query = conv_query.where(Conversation.created_at <= e_dt)
+            usage_query = usage_query.where(UsageEvent.created_at <= e_dt)
+        except Exception:
+            pass
+
+    conv_res = await db.execute(conv_query)
+    conversations = conv_res.scalars().all()
+    convs_count = len(conversations)
+
+    usage_res = await db.execute(usage_query)
+    usage_events = usage_res.scalars().all()
+    events_count = len(usage_events)
+
+    escalated_count = sum(1 for c in conversations if c.is_human_takeover or c.status == ConversationStatus.ESCALATED)
+    resolved_count = convs_count - escalated_count
+
+    ai_res_rate = f"{(resolved_count / convs_count * 100):.1f}%" if convs_count > 0 else "0.0%"
+    human_esc_rate = f"{(escalated_count / convs_count * 100):.1f}%" if convs_count > 0 else "0.0%"
+
+    total_cost = sum(float(ev.estimated_cost or 0.0) for ev in usage_events)
+
+    channel_counts = {}
+    for c in conversations:
+        ch = c.channel or "web_widget"
+        channel_counts[ch] = channel_counts.get(ch, 0) + 1
+
+    top_channels = {
+        ch: f"{(count / convs_count * 100):.1f}%"
+        for ch, count in channel_counts.items()
+    } if convs_count > 0 else {}
+
+    conv_ids = [c.id for c in conversations]
+    avg_latency = 0
+    if conv_ids:
+        msg_query = select(Message).where(Message.conversation_id.in_(conv_ids[:1000]))
+        msg_res = await db.execute(msg_query)
+        messages = msg_res.scalars().all()
+        latencies = [
+            m.metadata_json.get("latency_ms")
+            for m in messages
+            if m.metadata_json and isinstance(m.metadata_json.get("latency_ms"), (int, float))
+        ]
+        if latencies:
+            avg_latency = int(sum(latencies) / len(latencies))
 
     return {
         "organization_id": org_id,
         "total_conversations": convs_count,
         "total_usage_events": events_count,
-        "ai_resolution_rate": "94.5%",
-        "human_escalation_rate": "5.5%",
-        "average_response_time_ms": 340,
-        "total_cost_usd": round(events_count * 0.002, 2),
-        "top_channels": {"web_widget": "65%", "whatsapp": "25%", "voice": "10%"}
+        "ai_resolution_rate": ai_res_rate,
+        "human_escalation_rate": human_esc_rate,
+        "average_response_time_ms": avg_latency,
+        "total_cost_usd": round(total_cost, 4),
+        "top_channels": top_channels
     }

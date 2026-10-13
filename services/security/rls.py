@@ -31,8 +31,9 @@ def generate_rls_sql() -> str:
     """Generates PostgreSQL DDL statements for enabling RLS policies on all tenant tables."""
     ddl_statements = []
     for tbl in RLS_TABLES:
-        # Enable RLS on table
+        # Enable RLS on table and enforce even for table owners
         ddl_statements.append(f"ALTER TABLE {tbl} ENABLE ROW LEVEL SECURITY;")
+        ddl_statements.append(f"ALTER TABLE {tbl} FORCE ROW LEVEL SECURITY;")
         # Drop existing policy if any
         ddl_statements.append(f"DROP POLICY IF EXISTS tenant_isolation_policy ON {tbl};")
         

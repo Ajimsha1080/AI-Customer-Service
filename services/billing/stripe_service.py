@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.api.config import settings
+from services.database.session import set_tenant_context
 from services.database.models import Subscription, Organization, ProcessedWebhookEvent
 from services.billing.metering import SaaSMeteringService
 
@@ -203,6 +204,8 @@ class StripeBillingService:
 
         if event_type == "checkout.session.completed":
             org_id = event_data.get("client_reference_id") or event_data.get("metadata", {}).get("organization_id")
+            if org_id:
+                await set_tenant_context(db, org_id)
             cust_id = event_data.get("customer")
             sub_id = event_data.get("subscription")
 
@@ -261,6 +264,7 @@ class StripeBillingService:
                 res = await db.execute(stmt)
                 db_sub = res.scalar_one_or_none()
                 if db_sub:
+                    await set_tenant_context(db, db_sub.organization_id)
                     db_sub.subscription_status = sub_status
                     if sub_status == "active":
                         db_sub.dunning_attempt_count = 0

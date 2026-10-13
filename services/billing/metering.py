@@ -39,8 +39,14 @@ class UsageMeteringService:
         db: Optional[AsyncSession] = None
     ) -> Dict[str, Any]:
         """Logs billable usage event and persists it directly into the database UsageEvent table."""
-        unit_cost = 0.000002 if unit == "tokens" else (0.02 if unit == "minutes" else 0.001)
-        estimated_cost = round(quantity * unit_cost, 6)
+        if unit == "tokens":
+            pricing = self.MODEL_PRICING.get(provider.lower(), {"input_per_1k": 0.00015, "output_per_1k": 0.0006})
+            avg_per_token = ((pricing.get("input_per_1k", 0.00015) + pricing.get("output_per_1k", 0.0006)) / 2) / 1000
+            estimated_cost = round(quantity * avg_per_token, 6)
+        elif unit == "minutes":
+            estimated_cost = round(quantity * 0.02, 6)
+        else:
+            estimated_cost = round(quantity * 0.001, 6)
         evt_id = f"evt_{uuid.uuid4().hex[:10]}"
 
         event_dict = {
@@ -105,8 +111,14 @@ class UsageMeteringService:
         conversation_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """Synchronous legacy method signature maintaining backward compatibility."""
-        unit_cost = 0.000002 if unit == "tokens" else (0.02 if unit == "minutes" else 0.001)
-        estimated_cost = round(quantity * unit_cost, 6)
+        if unit == "tokens":
+            pricing = self.MODEL_PRICING.get(provider.lower(), {"input_per_1k": 0.00015, "output_per_1k": 0.0006})
+            avg_per_token = ((pricing.get("input_per_1k", 0.00015) + pricing.get("output_per_1k", 0.0006)) / 2) / 1000
+            estimated_cost = round(quantity * avg_per_token, 6)
+        elif unit == "minutes":
+            estimated_cost = round(quantity * 0.02, 6)
+        else:
+            estimated_cost = round(quantity * 0.001, 6)
         evt_id = f"evt_{uuid.uuid4().hex[:10]}"
 
         event_dict = {
@@ -197,7 +209,7 @@ class UsageMeteringService:
             except Exception:
                 session = None
 
-        plan_name = "BUSINESS" if organization_id == "org_azure_group" else "STARTER"
+        plan_name = "FREE"
         default_limits = self.PLAN_LIMITS[plan_name]
 
         sub_dict = {
@@ -265,7 +277,15 @@ class UsageMeteringService:
         """Enforces organization billing subscription quotas for agent turns, agent creation, and documents."""
         sub = await self.get_or_create_subscription_async(organization_id, db=db)
         plan_name = sub["plan_name"].upper()
-        limits = self.PLAN_LIMITS.get(plan_name, self.PLAN_LIMITS["STARTER"])
+        limits = self.PLAN_LIMITS.get(plan_name, self.PLAN_LIMITS["FREE"])
+
+        # Enforce subscription status (canceled, past_due, unpaid)
+        sub_status = (sub.get("status") or "ACTIVE").upper()
+        if sub_status in ["CANCELED", "CANCELLED", "PAST_DUE", "UNPAID"]:
+            return False, f"Subscription is {sub_status}. Please update payment method or reactivate your subscription.", {"status": sub_status, "plan": plan_name}
+
+        now = datetime.now(timezone.utc)
+        billing_period_start = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
 
         session = db or self.db_session
         is_local = False
@@ -284,7 +304,8 @@ class UsageMeteringService:
                 if session:
                     stmt = select(func.count(UsageEvent.id)).where(
                         UsageEvent.organization_id == organization_id,
-                        UsageEvent.event_type.in_(["agent_turn", "chat_message"])
+                        UsageEvent.event_type.in_(["agent_turn", "chat_message"]),
+                        UsageEvent.created_at >= billing_period_start
                     )
                     res = await session.execute(stmt)
                     current_usage = res.scalar() or 0
@@ -298,7 +319,10 @@ class UsageMeteringService:
                 spend_caps = {"FREE": 5.0, "STARTER": 100.0, "PROFESSIONAL": 500.0, "BUSINESS": 2000.0, "ENTERPRISE": 10000.0}
                 max_spend = spend_caps.get(plan_name, 500.0)
                 if session:
-                    stmt_cost = select(func.sum(UsageEvent.estimated_cost)).where(UsageEvent.organization_id == organization_id)
+                    stmt_cost = select(func.sum(UsageEvent.estimated_cost)).where(
+                        UsageEvent.organization_id == organization_id,
+                        UsageEvent.created_at >= billing_period_start
+                    )
                     res_cost = await session.execute(stmt_cost)
                     total_cost = res_cost.scalar() or 0.0
                     if total_cost >= max_spend:
@@ -339,6 +363,24 @@ class UsageMeteringService:
 
                 if current_usage >= max_allowed:
                     return False, f"Team member seat limit reached ({current_usage}/{max_allowed} seats) for plan '{plan_name}'. Please upgrade your plan.", {"current": current_usage, "limit": max_allowed, "plan": plan_name}
+
+            elif resource in ["property_creation", "create_property", "properties"]:
+                from services.database.models import Property
+                max_allowed = sub.get("max_properties", limits.get("max_properties", 1))
+                if session:
+                    stmt = select(func.count(Property.id)).where(Property.organization_id == organization_id)
+                    res = await session.execute(stmt)
+                    current_usage = res.scalar() or 0
+                else:
+                    current_usage = 0
+
+                if current_usage >= max_allowed:
+                    return False, f"Property limit reached ({current_usage}/{max_allowed} properties) for plan '{plan_name}'. Please upgrade your plan.", {"current": current_usage, "limit": max_allowed, "plan": plan_name}
+
+            elif resource in ["voice_gateway", "voice_session", "voice"]:
+                voice_allowed = limits.get("voice_enabled", False)
+                if not voice_allowed:
+                    return False, f"Voice Gateway is disabled on the '{plan_name}' plan. Please upgrade to Professional or higher.", {"current": 0, "limit": 0, "plan": plan_name}
 
         finally:
             if is_local and session:

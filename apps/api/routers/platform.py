@@ -97,46 +97,81 @@ async def platform_realtime_events_stream(
 @router.get("/telemetry")
 async def get_platform_telemetry(current_user: User = Depends(get_super_admin_user), db: AsyncSession = Depends(get_db)):
     """Fetch accurate aggregated platform telemetry for Super Admin control plane."""
+    from services.database.models import AgentStatus, LiveUpdate, Message
+
     res_o = await db.execute(select(func.count(Organization.id)))
     orgs_count = res_o.scalar() or 0
 
     res_a = await db.execute(select(func.count(Agent.id)))
     agents_count = res_a.scalar() or 0
 
+    res_online = await db.execute(select(func.count(Agent.id)).where(Agent.status == AgentStatus.ACTIVE))
+    online_agents = res_online.scalar() or 0
+    offline_agents = max(0, agents_count - online_agents)
+
     res_s = await db.execute(select(func.count(IntegrationSource.id)))
     sources_count = res_s.scalar() or 0
+
+    res_f = await db.execute(select(func.count(IntegrationSource.id)).where(IntegrationSource.status.in_(["FAILED", "ERROR"])))
+    failed_integrations = res_f.scalar() or 0
+
+    # Calculate p95 latency from recent messages
+    msg_res = await db.execute(select(Message.metadata_json).order_by(Message.created_at.desc()).limit(500))
+    msg_metas = msg_res.scalars().all()
+    latencies = [
+        meta.get("latency_ms")
+        for meta in msg_metas
+        if meta and isinstance(meta.get("latency_ms"), (int, float))
+    ]
+    p95_latency = 0
+    if latencies:
+        latencies.sort()
+        idx = int(0.95 * (len(latencies) - 1))
+        p95_latency = int(latencies[idx])
+
+    # Fetch recent live events from database
+    events_stmt = (
+        select(LiveUpdate, Organization.name)
+        .join(Organization, LiveUpdate.organization_id == Organization.id)
+        .order_by(LiveUpdate.created_at.desc())
+        .limit(10)
+    )
+    events_res = await db.execute(events_stmt)
+    live_events_rows = events_res.all()
+
+    recent_live_events = []
+    now = datetime.now(timezone.utc)
+    for update, org_name in live_events_rows:
+        delta_sec = int((now - update.created_at.replace(tzinfo=timezone.utc if update.created_at.tzinfo is None else update.created_at.tzinfo)).total_seconds()) if update.created_at else 0
+        if delta_sec < 60:
+            time_str = "Just now"
+        elif delta_sec < 3600:
+            time_str = f"{delta_sec // 60}m ago"
+        else:
+            time_str = f"{delta_sec // 3600}h ago"
+
+        recent_live_events.append({
+            "org_name": org_name,
+            "summary": f"{update.title}: {update.content[:80]}" if update.content else update.title,
+            "status": "ONLINE" if update.is_active else "INACTIVE",
+            "timestamp": time_str
+        })
+
+    system_health = "DEGRADED" if failed_integrations > 0 else "OPERATIONAL"
+    sla_uptime = "99.9%" if failed_integrations > 0 else "100.0%"
 
     return {
         "total_organizations": orgs_count,
         "active_organizations": orgs_count,
         "active_agents": agents_count,
-        "online_agents": agents_count,
-        "offline_agents": 0,
+        "online_agents": online_agents,
+        "offline_agents": offline_agents,
         "connected_integrations": sources_count,
-        "failed_integrations": 0,
-        "system_health": "100% OPERATIONAL",
-        "sla_uptime": "99.99%",
-        "p95_latency_ms": 340,
-        "recent_live_events": [
-            {
-                "org_name": "Azure Palm Hostel",
-                "summary": "Food timing updated: Dinner set to 08:00 PM",
-                "status": "ONLINE",
-                "timestamp": "Just now"
-            },
-            {
-                "org_name": "Azure Palm Hostel",
-                "summary": "Campus ERP Integration Sync completed",
-                "status": "CONNECTED",
-                "timestamp": "1 min ago"
-            },
-            {
-                "org_name": "Azure Palm Hostel",
-                "summary": "New notice published: Main Gate Timings Update",
-                "status": "ACTIVE",
-                "timestamp": "2 min ago"
-            }
-        ]
+        "failed_integrations": failed_integrations,
+        "system_health": system_health,
+        "sla_uptime": sla_uptime,
+        "p95_latency_ms": p95_latency,
+        "recent_live_events": recent_live_events
     }
 
 @router.get("/db-health")

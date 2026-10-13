@@ -1,247 +1,337 @@
 'use client';
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { ChevronRight, Building2, BookOpen, Bot, Rocket, Sparkles, Play } from 'lucide-react';
-import { API_BASE, authFetch } from '@/lib/api';
+import { ChevronRight, Building2, BookOpen, Bot, Rocket, Sparkles, Play, Upload, AlertCircle, Loader2, CheckCircle2 } from 'lucide-react';
+import { API_BASE, authFetch, getCurrentSession } from '@/lib/api';
 
 export default function OnboardingWizardPage() {
-  const [currentStep, setCurrentStep] = useState(1);
   const router = useRouter();
+  const [currentStep, setCurrentStep] = useState(1);
+  const [session, setSession] = useState<any>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const [formData, setFormData] = useState({
-    propertyName: 'Azure Palm Resort & Spa',
-    propertyType: 'resort',
-    address: 'Marari Beach, Kerala, India',
-    agentName: 'Azure Concierge',
-    enabledTools: ['availability', 'facility_status', 'booking']
-  });
+  const [propertyName, setPropertyName] = useState('');
+  const [propertyType, setPropertyType] = useState('hotel');
+  const [propertyAddress, setPropertyAddress] = useState('');
 
-  const steps = [
-    { num: 1, title: 'Create Property', desc: 'Set property name and location' },
-    { num: 2, title: 'Property Information', desc: 'Upload guest guide or policies' },
-    { num: 3, title: 'Connect Availability', desc: 'Enable live room & pool tools' },
-    { num: 4, title: 'Select Predefined AI Agent', desc: 'Choose Concierge, Booking, or Support' },
-    { num: 5, title: 'Test Agent', desc: 'Try sample guest inquiries' },
-    { num: 6, title: 'Deploy', desc: 'Activate agent in production' }
-  ];
+  // Step 2 Document
+  const [uploadedFile, setUploadedFile] = useState<File | null>(null);
+  const [documentContent, setDocumentContent] = useState('');
+  const [documentTitle, setDocumentTitle] = useState('');
 
-  const progressPct = Math.round((currentStep / steps.length) * 100);
+  // Step 4 Agent
+  const [agentName, setAgentName] = useState('Front Desk AI Concierge');
+  const [agentTone, setAgentTone] = useState('Friendly, Professional');
 
-  const handleNext = async () => {
-    if (currentStep < 6) {
-      setCurrentStep(prev => prev + 1);
-    } else {
-      try {
-        const propRes = await authFetch(`${API_BASE}/api/v1/properties`, {
-          method: 'POST',
-          body: JSON.stringify({
-            organization_id: 'org_azure_group',
-            name: formData.propertyName,
-            property_type: formData.propertyType,
-            timezone: 'UTC'
-          })
-        });
-        const propData = await propRes.json();
-        const propertyId = propData.id || 'prop_azure_palm_resort';
-
-        await authFetch(`${API_BASE}/api/v1/agents`, {
-          method: 'POST',
-          body: JSON.stringify({
-            organization_id: 'org_azure_group',
-            property_id: propertyId,
-            name: formData.agentName,
-            agent_type: 'CONCIERGE',
-            tone: 'Luxury'
-          })
-        });
-      } catch (err) {
-        console.error('Onboarding sync error:', err);
+  useEffect(() => {
+    async function load() {
+      const sess = await getCurrentSession();
+      setSession(sess);
+      if (sess?.organization_name) {
+        setPropertyName(`${sess.organization_name} Main`);
       }
-      router.push('/app/dashboard');
+    }
+    load();
+  }, []);
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files[0]) {
+      const file = e.target.files[0];
+      setUploadedFile(file);
+      setDocumentTitle(file.name);
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        setDocumentContent((event.target?.result as string) || '');
+      };
+      reader.readAsText(file);
     }
   };
 
+  const handleCompleteOnboarding = async () => {
+    if (!session?.organization_id) {
+      setError('Active session not found. Please log in.');
+      return;
+    }
+    setLoading(true);
+    setError(null);
+
+    try {
+      // 1. Create property
+      const propRes = await authFetch('/api/v1/properties', {
+        method: 'POST',
+        body: JSON.stringify({
+          organization_id: session.organization_id,
+          name: propertyName || 'Main Property',
+          property_type: propertyType,
+          address: propertyAddress || undefined,
+          timezone: 'UTC'
+        })
+      });
+
+      if (!propRes.ok) {
+        const err = await propRes.json();
+        throw new Error(err.detail || 'Failed to create property');
+      }
+      const propData = await propRes.json();
+      const propertyId = propData.id;
+
+      // 2. Upload knowledge document if provided
+      if (documentContent.trim()) {
+        const docRes = await authFetch('/api/v1/knowledge/documents', {
+          method: 'POST',
+          body: JSON.stringify({
+            organization_id: session.organization_id,
+            property_id: propertyId,
+            title: documentTitle || 'Property Knowledge Guide',
+            content: documentContent,
+            document_type: uploadedFile?.name.split('.').pop() || 'txt'
+          })
+        });
+
+        if (!docRes.ok) {
+          const err = await docRes.json();
+          throw new Error(err.detail || 'Failed to index knowledge document');
+        }
+      }
+
+      // 3. Create Concierge Agent
+      const agentRes = await authFetch('/api/v1/agents', {
+        method: 'POST',
+        body: JSON.stringify({
+          organization_id: session.organization_id,
+          property_id: propertyId,
+          name: agentName || 'AI Concierge',
+          agent_type: 'CONCIERGE',
+          tone: agentTone
+        })
+      });
+
+      if (!agentRes.ok) {
+        const err = await agentRes.json();
+        throw new Error(err.detail || 'Failed to deploy AI concierge agent');
+      }
+
+      router.push('/app/dashboard');
+    } catch (err: any) {
+      setError(err.message || 'Onboarding failed');
+      setLoading(false);
+    }
+  };
+
+  const steps = [
+    { num: 1, title: 'Create Property' },
+    { num: 2, title: 'Upload Knowledge' },
+    { num: 3, title: 'Configure AI Concierge' },
+    { num: 4, title: 'Deploy & Finish' }
+  ];
+
   return (
-    <div className="max-w-3xl mx-auto space-y-6 font-sans">
-      {/* Onboarding Header */}
-      <div className="text-center space-y-2">
-        <div className="yc-badge mb-2">
-          <span>✨ Welcome to Hospitality Agent Cloud</span>
+    <div className="max-w-2xl mx-auto py-12 px-4 font-sans">
+      <div className="mb-8">
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-xs font-mono font-bold uppercase text-zinc-400">Step {currentStep} of {steps.length}</span>
+          <span className="text-xs font-bold text-zinc-900">{Math.round((currentStep / steps.length) * 100)}% Complete</span>
         </div>
-        <h1 className="text-2xl font-bold text-zinc-900">Let&apos;s launch your first AI concierge.</h1>
-        <p className="text-xs text-zinc-600">Complete this 6-step guided wizard to deploy an AI agent for your property in under 3 minutes.</p>
-      </div>
-
-      {/* Progress Bar & Percentage */}
-      <div className="yc-card p-5 space-y-2.5">
-        <div className="flex items-center justify-between text-xs font-semibold">
-          <span className="text-zinc-500 uppercase tracking-wider text-[11px] font-mono">ONBOARDING PROGRESS</span>
-          <span className="text-zinc-900 font-mono text-[11px] font-bold">{progressPct}% Completed</span>
-        </div>
-        <div className="w-full bg-zinc-100 rounded-full h-2 overflow-hidden border border-zinc-200">
+        <div className="w-full bg-zinc-200 h-1.5 rounded-full overflow-hidden">
           <div 
-            style={{ width: `${progressPct}%` }}
-            className="bg-zinc-900 h-full transition-all duration-300 rounded-full"
-          ></div>
+            className="bg-zinc-900 h-full rounded-full transition-all duration-300"
+            style={{ width: `${(currentStep / steps.length) * 100}%` }}
+          />
         </div>
       </div>
 
-      {/* Step Content */}
-      <div className="yc-card p-6 space-y-5">
+      {error && (
+        <div className="mb-6 p-4 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-center gap-2">
+          <AlertCircle className="w-4 h-4 shrink-0" />
+          <span>{error}</span>
+        </div>
+      )}
+
+      <div className="yc-card p-8 space-y-6">
         {currentStep === 1 && (
-          <div className="space-y-5">
-            <div className="flex items-center gap-3 border-b border-zinc-200 pb-4">
-              <div className="w-8 h-8 rounded-lg bg-zinc-900 text-white flex items-center justify-center shadow-xs">
-                <Building2 className="w-4 h-4" />
-              </div>
-              <div>
-                <h2 className="text-sm font-bold text-zinc-900">STEP 1: Create Property</h2>
-                <p className="text-[11px] text-zinc-500">Enter basic details for your resort, hotel, or hostel.</p>
-              </div>
+          <div className="space-y-4 text-xs">
+            <div className="border-b border-zinc-200 pb-3">
+              <h2 className="text-base font-bold text-zinc-900">Step 1: Property Details</h2>
+              <p className="text-zinc-500">Enter your hospitality property name and type.</p>
             </div>
 
-            <div className="space-y-4 text-xs">
-              <div>
-                <label className="block text-zinc-700 font-semibold mb-1.5">Property Name</label>
-                <input 
-                  type="text" 
-                  value={formData.propertyName}
-                  onChange={(e) => setFormData({...formData, propertyName: e.target.value})}
-                  className="w-full bg-zinc-50 border border-zinc-200 rounded-lg px-3.5 py-2 text-xs text-zinc-900 focus:outline-none focus:border-zinc-400"
-                />
-              </div>
-
-              <div>
-                <label className="block text-zinc-700 font-semibold mb-1.5">Property Category</label>
-                <select 
-                  value={formData.propertyType}
-                  onChange={(e) => setFormData({...formData, propertyType: e.target.value})}
-                  className="w-full bg-zinc-50 border border-zinc-200 rounded-lg px-3.5 py-2 text-xs text-zinc-900 focus:outline-none focus:border-zinc-400"
-                >
-                  <option value="resort">Luxury Resort & Spa</option>
-                  <option value="hotel">Boutique Hotel</option>
-                  <option value="hostel">Hostel</option>
-                  <option value="apartment">Serviced Apartments</option>
-                </select>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {currentStep === 2 && (
-          <div className="space-y-5">
-            <div className="flex items-center gap-3 border-b border-zinc-200 pb-4">
-              <div className="w-8 h-8 rounded-lg bg-zinc-900 text-white flex items-center justify-center shadow-xs">
-                <BookOpen className="w-4 h-4" />
-              </div>
-              <div>
-                <h2 className="text-sm font-bold text-zinc-900">STEP 2: Add Property Information</h2>
-                <p className="text-[11px] text-zinc-500">Upload your guest guide, policies, or restaurant menu PDF.</p>
-              </div>
+            <div>
+              <label className="block font-medium text-zinc-700 mb-1">Property Name</label>
+              <input
+                type="text"
+                required
+                value={propertyName}
+                onChange={(e) => setPropertyName(e.target.value)}
+                placeholder="e.g. Grand Sapphire Resort"
+                className="w-full border border-zinc-200 rounded-lg p-2.5 bg-zinc-50 text-zinc-900"
+              />
             </div>
 
-            <div className="p-6 border-2 border-dashed border-zinc-300 rounded-xl text-center bg-zinc-50 space-y-2">
-              <BookOpen className="w-6 h-6 text-zinc-600 mx-auto" />
-              <p className="text-xs font-semibold text-zinc-900">Demo File Loaded: Azure Palm Resort Guest Guide 2026.pdf</p>
-              <p className="text-[11px] text-emerald-700 font-mono font-semibold">✓ Parsed into 24 vector chunks with pgvector tenant metadata.</p>
-            </div>
-          </div>
-        )}
-
-        {currentStep === 3 && (
-          <div className="space-y-5">
-            <div className="flex items-center gap-3 border-b border-zinc-200 pb-4">
-              <div className="w-8 h-8 rounded-lg bg-zinc-900 text-white flex items-center justify-center shadow-xs">
-                <Sparkles className="w-4 h-4" />
-              </div>
-              <div>
-                <h2 className="text-sm font-bold text-zinc-900">STEP 3: Connect Live Tools & Availability</h2>
-                <p className="text-[11px] text-zinc-500">Enable real-time tools for room availability, prices, and pool hours.</p>
-              </div>
+            <div>
+              <label className="block font-medium text-zinc-700 mb-1">Property Type</label>
+              <select
+                value={propertyType}
+                onChange={(e) => setPropertyType(e.target.value)}
+                className="w-full border border-zinc-200 rounded-lg p-2.5 bg-zinc-50 text-zinc-900"
+              >
+                <option value="hotel">Hotel</option>
+                <option value="resort">Resort</option>
+                <option value="hostel">Hostel / Campus</option>
+                <option value="villa">Luxury Villa</option>
+              </select>
             </div>
 
-            <div className="p-4 bg-zinc-50 border border-zinc-200 rounded-lg space-y-2.5 text-xs">
-              <div className="flex items-center justify-between">
-                <span className="text-zinc-800 font-medium">✓ Room Vacancy & Availability Tool</span>
-                <span className="yc-badge-emerald">Connected</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-zinc-800 font-medium">✓ Facility Operational Status (Pool/Spa)</span>
-                <span className="yc-badge-emerald">Connected</span>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {currentStep === 4 && (
-          <div className="space-y-5">
-            <div className="flex items-center gap-3 border-b border-zinc-200 pb-4">
-              <div className="w-8 h-8 rounded-lg bg-zinc-900 text-white flex items-center justify-center shadow-xs">
-                <Bot className="w-4 h-4" />
-              </div>
-              <div>
-                <h2 className="text-sm font-bold text-zinc-900">STEP 4: Select Predefined AI Agent</h2>
-                <p className="text-[11px] text-zinc-500">Select pre-configured enterprise agent template for your property.</p>
-              </div>
-            </div>
-
-            <div className="text-xs">
-              <label className="block text-zinc-700 font-semibold mb-1.5">Agent Name</label>
-              <input 
-                type="text" 
-                value={formData.agentName}
-                onChange={(e) => setFormData({...formData, agentName: e.target.value})}
-                className="w-full bg-zinc-50 border border-zinc-200 rounded-lg px-3.5 py-2 text-xs text-zinc-900 focus:outline-none focus:border-zinc-400"
+            <div>
+              <label className="block font-medium text-zinc-700 mb-1">Physical Address</label>
+              <input
+                type="text"
+                value={propertyAddress}
+                onChange={(e) => setPropertyAddress(e.target.value)}
+                placeholder="e.g. 100 Coastal Rd, Miami, FL"
+                className="w-full border border-zinc-200 rounded-lg p-2.5 bg-zinc-50 text-zinc-900"
               />
             </div>
           </div>
         )}
 
-        {currentStep === 5 && (
-          <div className="space-y-5">
-            <div className="flex items-center gap-3 border-b border-zinc-200 pb-4">
-              <div className="w-8 h-8 rounded-lg bg-zinc-900 text-white flex items-center justify-center shadow-xs">
-                <Play className="w-4 h-4" />
-              </div>
+        {currentStep === 2 && (
+          <div className="space-y-4 text-xs">
+            <div className="border-b border-zinc-200 pb-3">
+              <h2 className="text-base font-bold text-zinc-900">Step 2: Add Knowledge Base Guide</h2>
+              <p className="text-zinc-500">Upload a guest guide, FAQ list, or restaurant menu.</p>
+            </div>
+
+            <div className="border-2 border-dashed border-zinc-300 rounded-xl p-6 text-center space-y-3 bg-zinc-50">
+              <Upload className="w-8 h-8 text-zinc-400 mx-auto" />
               <div>
-                <h2 className="text-sm font-bold text-zinc-900">STEP 5: Test Agent Inquiries</h2>
-                <p className="text-[11px] text-zinc-500">Simulate a guest question before publishing to production.</p>
+                <label className="cursor-pointer font-bold text-indigo-600 hover:text-indigo-500">
+                  Select a document file (.txt, .pdf, .md)
+                  <input
+                    type="file"
+                    accept=".txt,.pdf,.md,.docx"
+                    onChange={handleFileChange}
+                    className="hidden"
+                  />
+                </label>
+                <p className="text-[11px] text-zinc-500 mt-1">Text or document up to 10 MB</p>
+              </div>
+              {uploadedFile && (
+                <div className="p-2 bg-emerald-50 text-emerald-800 rounded-lg font-mono text-[11px] flex items-center justify-center gap-1.5">
+                  <CheckCircle2 className="w-4 h-4" /> Selected: {uploadedFile.name} ({Math.round(uploadedFile.size / 1024)} KB)
+                </div>
+              )}
+            </div>
+
+            <div>
+              <label className="block font-medium text-zinc-700 mb-1">Or paste plain text guide:</label>
+              <textarea
+                rows={4}
+                value={documentContent}
+                onChange={(e) => {
+                  setDocumentContent(e.target.value);
+                  if (!documentTitle) setDocumentTitle('Property Guidelines');
+                }}
+                placeholder="Pool hours: 6 AM to 10 PM. Breakfast served 7 AM to 10:30 AM at Main Dining..."
+                className="w-full border border-zinc-200 rounded-lg p-2.5 bg-zinc-50 text-zinc-900"
+              />
+            </div>
+          </div>
+        )}
+
+        {currentStep === 3 && (
+          <div className="space-y-4 text-xs">
+            <div className="border-b border-zinc-200 pb-3">
+              <h2 className="text-base font-bold text-zinc-900">Step 3: AI Concierge Persona</h2>
+              <p className="text-zinc-500">Customize the AI agent greeting and communication style.</p>
+            </div>
+
+            <div>
+              <label className="block font-medium text-zinc-700 mb-1">Agent Name</label>
+              <input
+                type="text"
+                required
+                value={agentName}
+                onChange={(e) => setAgentName(e.target.value)}
+                className="w-full border border-zinc-200 rounded-lg p-2.5 bg-zinc-50 text-zinc-900"
+              />
+            </div>
+
+            <div>
+              <label className="block font-medium text-zinc-700 mb-1">Tone & Persona</label>
+              <input
+                type="text"
+                value={agentTone}
+                onChange={(e) => setAgentTone(e.target.value)}
+                placeholder="Friendly, Courteous, Professional"
+                className="w-full border border-zinc-200 rounded-lg p-2.5 bg-zinc-50 text-zinc-900"
+              />
+            </div>
+          </div>
+        )}
+
+        {currentStep === 4 && (
+          <div className="space-y-4 text-xs">
+            <div className="border-b border-zinc-200 pb-3">
+              <h2 className="text-base font-bold text-zinc-900">Step 4: Ready to Deploy</h2>
+              <p className="text-zinc-500">Review your setup and activate the production AI concierge.</p>
+            </div>
+
+            <div className="bg-zinc-50 p-4 rounded-xl space-y-2 border border-zinc-200">
+              <div className="flex justify-between">
+                <span className="text-zinc-500">Property:</span>
+                <span className="font-bold text-zinc-900">{propertyName}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-zinc-500">Knowledge:</span>
+                <span className="font-bold text-zinc-900">{documentTitle || (documentContent ? 'Text Guide' : 'None')}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-zinc-500">AI Concierge:</span>
+                <span className="font-bold text-zinc-900">{agentName}</span>
               </div>
             </div>
-
-            <div className="p-4 bg-zinc-50 border border-zinc-200 rounded-lg text-xs space-y-2">
-              <p className="font-semibold text-zinc-900">Test Query: &quot;Is the swimming pool open now?&quot;</p>
-              <p className="text-zinc-600 italic">Agent Response: &quot;The Infinity Swimming Pool is currently Open (06:00 AM - 08:00 PM).&quot;</p>
-            </div>
           </div>
         )}
 
-        {currentStep === 6 && (
-          <div className="space-y-4 text-center py-4">
-            <Rocket className="w-8 h-8 text-zinc-900 mx-auto" />
-            <h2 className="text-base font-bold text-zinc-900">STEP 6: Deploy Your AI Agent</h2>
-            <p className="text-xs text-zinc-600 max-w-sm mx-auto">
-              Your agent is fully configured. Click below to activate your agent on the Shared Agent Runtime.
-            </p>
-          </div>
-        )}
+        {/* Action Buttons */}
+        <div className="flex justify-between pt-4 border-t border-zinc-200">
+          {currentStep > 1 ? (
+            <button
+              type="button"
+              onClick={() => setCurrentStep(prev => prev - 1)}
+              className="px-4 py-2 border border-zinc-200 rounded-lg text-xs font-semibold text-zinc-700 hover:bg-zinc-50"
+            >
+              Back
+            </button>
+          ) : <div />}
 
-        {/* Wizard Footer Navigation */}
-        <div className="flex items-center justify-between border-t border-zinc-200 pt-4">
-          <button 
-            disabled={currentStep === 1}
-            onClick={() => setCurrentStep(prev => prev - 1)}
-            className="yc-btn-secondary disabled:opacity-40"
-          >
-            ← Back
-          </button>
-
-          <button 
-            onClick={handleNext}
-            className="yc-btn-primary flex items-center gap-1.5"
-          >
-            {currentStep === 6 ? 'Complete Setup & Open Dashboard →' : 'Continue to Next Step'} <ChevronRight className="w-3.5 h-3.5" />
-          </button>
+          {currentStep < 4 ? (
+            <button
+              type="button"
+              onClick={() => setCurrentStep(prev => prev + 1)}
+              className="yc-btn-primary flex items-center gap-1.5 text-xs"
+            >
+              Continue <ChevronRight className="w-3.5 h-3.5" />
+            </button>
+          ) : (
+            <button
+              type="button"
+              disabled={loading}
+              onClick={handleCompleteOnboarding}
+              className="yc-btn-primary flex items-center gap-1.5 text-xs disabled:opacity-50"
+            >
+              {loading ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" /> Provisioning...
+                </>
+              ) : (
+                <>
+                  <Rocket className="w-3.5 h-3.5" /> Activate Workspace
+                </>
+              )}
+            </button>
+          )}
         </div>
       </div>
     </div>

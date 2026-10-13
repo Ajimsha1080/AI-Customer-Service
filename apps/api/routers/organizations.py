@@ -78,6 +78,45 @@ async def list_organizations(
     orgs = res.scalars().all()
     return [{"id": o.id, "name": o.name, "slug": o.slug, "status": o.status} for o in orgs]
 
+class UpdateOrgRequest(BaseModel):
+    name: Optional[str] = None
+
+@router.get("/organizations/{organization_id}")
+async def get_organization(
+    organization_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    org_id = verify_tenant_access(current_user, organization_id)
+    stmt = select(Organization).where(Organization.id == org_id)
+    res = await db.execute(stmt)
+    org = res.scalar_one_or_none()
+    if not org:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Organization not found")
+    return {"id": org.id, "name": org.name, "slug": org.slug, "status": org.status}
+
+@router.patch("/organizations/{organization_id}")
+async def update_organization(
+    organization_id: str,
+    req: UpdateOrgRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    org_id = verify_tenant_access(current_user, organization_id)
+    caller_role_val = current_user.role.value if hasattr(current_user.role, "value") else str(current_user.role)
+    if ROLE_HIERARCHY.get(caller_role_val, 0) < ROLE_HIERARCHY.get(UserRole.ADMIN, 80):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only Admins or Owners may update organization settings.")
+    stmt = select(Organization).where(Organization.id == org_id)
+    res = await db.execute(stmt)
+    org = res.scalar_one_or_none()
+    if not org:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Organization not found")
+    if req.name:
+        org.name = req.name.strip()
+    await db.commit()
+    await db.refresh(org)
+    return {"id": org.id, "name": org.name, "slug": org.slug, "status": org.status}
+
 # --- 0.2 MEMBER MANAGEMENT & INVITATIONS ---
 
 @router.post("/organizations/{organization_id}/invitations")

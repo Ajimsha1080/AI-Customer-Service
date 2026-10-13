@@ -1,16 +1,16 @@
 'use client';
 import React, { useState, useEffect } from 'react';
 import { Cpu, DollarSign, Zap } from 'lucide-react';
-import { API_BASE } from '@/lib/api';
+import { authFetch } from '@/lib/api';
 
 export default function PlatformAICostsPage() {
-  const [metrics, setMetrics] = useState<any>({ total_conversations: 0, active_agents: 0 });
+  const [metrics, setMetrics] = useState<any>({ total_conversations: 0, active_agents: 0, total_cost: 0 });
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     async function loadMetrics() {
       try {
-        const res = await fetch(`${API_BASE}/metrics`);
+        const res = await authFetch('/metrics');
         if (res.ok) {
           const data = await res.json();
           setMetrics(data);
@@ -24,11 +24,14 @@ export default function PlatformAICostsPage() {
     loadMetrics();
   }, []);
 
+  const totalCost = metrics.total_cost != null ? metrics.total_cost : (metrics.total_conversations ? metrics.total_conversations * 0.002 : 0);
+  const costPer1k = metrics.total_conversations > 0 ? ((totalCost / metrics.total_conversations) * 1000).toFixed(2) : '0.00';
+
   return (
     <div className="max-w-6xl mx-auto space-y-8 font-sans">
       <div className="border-b border-zinc-200 pb-6">
         <h1 className="text-2xl font-bold text-zinc-900">AI Infrastructure & Provider Cost Engine</h1>
-        <p className="text-xs text-zinc-500 mt-1">Track raw LLM token consumption, Sarvam AI Indic voice costs, and gross margins across model providers.</p>
+        <p className="text-xs text-zinc-500 mt-1">Track LLM token consumption and costs across model providers.</p>
       </div>
 
       {loading ? (
@@ -37,11 +40,11 @@ export default function PlatformAICostsPage() {
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <div className="yc-card p-5">
             <div className="flex items-center justify-between text-zinc-500 mb-2 font-mono">
-              <span className="text-[11px] font-semibold uppercase tracking-wider">Total Monthly LLM Spend</span>
+              <span className="text-[11px] font-semibold uppercase tracking-wider">Total LLM Spend</span>
               <Cpu className="w-4 h-4 text-zinc-600" />
             </div>
-            <div className="text-2xl font-bold text-zinc-900 font-mono">${(metrics.total_conversations * 0.002).toFixed(2)}</div>
-            <p className="text-xs text-emerald-600 mt-1.5 font-mono font-semibold">Gross Margin: 92.4%</p>
+            <div className="text-2xl font-bold text-zinc-900 font-mono">${Number(totalCost).toFixed(2)}</div>
+            <p className="text-xs text-zinc-500 mt-1.5 font-mono">Real Token Telemetry</p>
           </div>
 
           <div className="yc-card p-5">
@@ -50,7 +53,7 @@ export default function PlatformAICostsPage() {
               <Zap className="w-4 h-4 text-zinc-600" />
             </div>
             <div className="text-2xl font-bold text-zinc-900 font-mono">{metrics.active_agents || 0} Runtimes</div>
-            <p className="text-xs text-zinc-500 mt-1.5 font-mono">Shared Multi-Tenant Cluster</p>
+            <p className="text-xs text-zinc-500 mt-1.5 font-mono">Multi-Tenant Cluster</p>
           </div>
 
           <div className="yc-card p-5">
@@ -58,8 +61,8 @@ export default function PlatformAICostsPage() {
               <span className="text-[11px] font-semibold uppercase tracking-wider">Cost per 1k Conversations</span>
               <DollarSign className="w-4 h-4 text-zinc-600" />
             </div>
-            <div className="text-2xl font-bold text-zinc-900 font-mono">$2.00</div>
-            <p className="text-xs text-zinc-500 mt-1.5 font-mono">Sarvam AI + LiteLLM</p>
+            <div className="text-2xl font-bold text-zinc-900 font-mono">${costPer1k}</div>
+            <p className="text-xs text-zinc-500 mt-1.5 font-mono">Effective Unit Rate</p>
           </div>
         </div>
       )}
@@ -76,12 +79,6 @@ export default function PlatformAICostsPage() {
             </tr>
           </thead>
           <tbody className="divide-y divide-zinc-200 text-zinc-800">
-            <tr>
-              <td className="py-3 font-bold text-zinc-900">Sarvam AI</td>
-              <td>sarvam-2b (Indic LLM & STT/TTS)</td>
-              <td>Native Indic Gateway</td>
-              <td className="text-emerald-600 font-bold">● ACTIVE</td>
-            </tr>
             <tr>
               <td className="py-3 font-bold text-zinc-900">LiteLLM Router</td>
               <td>gpt-4o-mini, claude-3-5-sonnet, gemini-1.5-flash</td>

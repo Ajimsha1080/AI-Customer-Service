@@ -192,8 +192,10 @@ class PostgresPgVectorStore(VectorStoreInterface):
                         }
                         for c in pg_chunks
                     ]
-            except Exception:
-                # pgvector not available or running SQLite; fallback to Python cosine over embedding_json
+            except Exception as e:
+                import os
+                if os.getenv("ENVIRONMENT", "").lower() == "production":
+                    raise RuntimeError(f"CRITICAL: pgvector cosine search failed in production: {e}. Python-cosine fallback is forbidden in production.")
                 pass
 
             # 2. Resilient Python cosine fallback over stored embedding_json

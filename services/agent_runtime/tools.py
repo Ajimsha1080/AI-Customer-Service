@@ -931,16 +931,53 @@ class HospitalityToolRegistry:
             return {"live_updates": updates_list}
 
     async def tool_get_weather(self, args: Dict[str, Any], organization_id: str, property_id: str) -> Dict[str, Any]:
+        import httpx
         async with self._session_scope() as session:
             stmt = select(Property).where(Property.id == property_id)
             res = await session.execute(stmt)
             prop = res.scalar_one_or_none()
-            loc = prop.address if prop and prop.address else "Property Location"
+            loc = prop.address if prop and prop.address else None
+            if not loc:
+                return {
+                    "available": False,
+                    "message": "Property address not configured for live weather forecast."
+                }
+            try:
+                async with httpx.AsyncClient(timeout=4.0) as client:
+                    geo_res = await client.get(
+                        "https://geocoding-api.open-meteo.com/v1/search",
+                        params={"name": loc, "count": 1}
+                    )
+                    if geo_res.status_code == 200:
+                        geo_data = geo_res.json()
+                        results = geo_data.get("results")
+                        if results:
+                            lat = results[0]["latitude"]
+                            lon = results[0]["longitude"]
+                            w_res = await client.get(
+                                "https://api.open-meteo.com/v1/forecast",
+                                params={
+                                    "latitude": lat,
+                                    "longitude": lon,
+                                    "current": "temperature_2m,relative_humidity_2m,weather_code"
+                                }
+                            )
+                            if w_res.status_code == 200:
+                                current = w_res.json().get("current", {})
+                                temp_c = current.get("temperature_2m")
+                                hum = current.get("relative_humidity_2m")
+                                return {
+                                    "available": True,
+                                    "location": loc,
+                                    "temperature": f"{temp_c}°C",
+                                    "humidity": f"{hum}%" if hum is not None else "N/A"
+                                }
+            except Exception:
+                pass
             return {
+                "available": False,
                 "location": loc,
-                "temperature": "24°C (75°F)",
-                "condition": "Pleasant / Clear",
-                "humidity": "55%"
+                "message": f"Live weather forecast temporarily unavailable for {loc}."
             }
 
     async def tool_create_service_request(self, args: Dict[str, Any], organization_id: str, property_id: str) -> Dict[str, Any]:

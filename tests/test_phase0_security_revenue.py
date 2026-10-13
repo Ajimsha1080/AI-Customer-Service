@@ -153,3 +153,113 @@ def test_customer_portal_requires_customer_id(client, org_admin_headers):
     # May return 200 (if cus_stripe_123 was set in earlier test) or 400/502
     assert res.status_code in [200, 400, 502]
 
+def test_webhook_signed_with_old_default_mock_secret_rejected(client):
+    """A1 Requirement: Signing with old default 'whsec_mock_stripe_webhook_secret' must be rejected with 400."""
+    import json
+    import stripe
+    import uuid
+
+    evt_id = f"evt_forged_old_{uuid.uuid4().hex[:8]}"
+    payload_dict = {
+        "id": evt_id,
+        "type": "checkout.session.completed",
+        "data": {
+            "object": {
+                "client_reference_id": "org_azure_group",
+                "customer": "cus_forged_999",
+                "subscription": "sub_forged_999",
+            }
+        }
+    }
+    payload_raw = json.dumps(payload_dict)
+    # Attacker tries using old default static mock secret
+    old_default_secret = "whsec_mock_stripe_webhook_secret"
+    sig_header = stripe.WebhookSignature.generate_signature_header(
+        payload_raw, old_default_secret
+    )
+
+    res = client.post(
+        "/api/v1/billing/webhook",
+        data=payload_raw,
+        headers={"stripe-signature": sig_header, "Content-Type": "application/json"}
+    )
+    assert res.status_code == 400, f"Expected 400 for forged webhook using old default secret, got {res.status_code}"
+    assert "Invalid Stripe webhook signature" in res.json()["detail"]
+
+def test_production_boot_refusal_with_mock_or_dev_secrets():
+    """A1 Requirement: Settings must refuse to boot in production if secrets contain 'mock', 'dev_', or 'change'."""
+    from apps.api.config import Settings
+
+    # Refuse boot when SECRET_KEY is a dev/change placeholder
+    with pytest.raises(ValueError, match="CRITICAL SECURITY RISK"):
+        Settings(
+            ENVIRONMENT="production",
+            SECRET_KEY="development_secret_key_change_in_production",
+            JWT_SECRET_KEY="real_secret_12345678901234567890",
+            JWT_REFRESH_SECRET_KEY="real_secret_12345678901234567890",
+            STRIPE_SECRET_KEY="sk_live_real_key_123",
+            STRIPE_WEBHOOK_SECRET="whsec_real_secret_123",
+            STRIPE_PRICE_STARTER="price_starter_real",
+            STRIPE_PRICE_PROFESSIONAL="price_pro_real",
+            STRIPE_PRICE_BUSINESS="price_biz_real",
+            STRIPE_PRICE_ENTERPRISE="price_ent_real",
+            OPENAI_API_KEY="sk-real-openai-key-live",
+            REDIS_URL="redis://production-redis:6379/0",
+            DATABASE_URL="postgresql+asyncpg://user:pass@prod-db:5432/db",
+            CORS_ORIGINS=["https://app.hospitalityagent.cloud"]
+        )
+
+    # Refuse boot when STRIPE_WEBHOOK_SECRET contains 'mock'
+    with pytest.raises(ValueError, match="CRITICAL SECURITY RISK"):
+        Settings(
+            ENVIRONMENT="production",
+            SECRET_KEY="real_secret_12345678901234567890",
+            JWT_SECRET_KEY="real_secret_12345678901234567890",
+            JWT_REFRESH_SECRET_KEY="real_secret_12345678901234567890",
+            STRIPE_SECRET_KEY="sk_live_real_key_123",
+            STRIPE_WEBHOOK_SECRET="whsec_mock_stripe_webhook_secret",
+            STRIPE_PRICE_STARTER="price_starter_real",
+            STRIPE_PRICE_PROFESSIONAL="price_pro_real",
+            STRIPE_PRICE_BUSINESS="price_biz_real",
+            STRIPE_PRICE_ENTERPRISE="price_ent_real",
+            OPENAI_API_KEY="sk-real-openai-key-live",
+            REDIS_URL="redis://production-redis:6379/0",
+            DATABASE_URL="postgresql+asyncpg://user:pass@prod-db:5432/db",
+            CORS_ORIGINS=["https://app.hospitalityagent.cloud"]
+        )
+
+    # Refuse boot when DATABASE_URL is SQLite in production
+    with pytest.raises(ValueError, match="CRITICAL SECURITY RISK"):
+        Settings(
+            ENVIRONMENT="production",
+            SECRET_KEY="real_secret_12345678901234567890",
+            JWT_SECRET_KEY="real_secret_12345678901234567890",
+            JWT_REFRESH_SECRET_KEY="real_secret_12345678901234567890",
+            STRIPE_SECRET_KEY="sk_live_real_key_123",
+            STRIPE_WEBHOOK_SECRET="whsec_real_secret_123",
+            STRIPE_PRICE_STARTER="price_starter_real",
+            STRIPE_PRICE_PROFESSIONAL="price_pro_real",
+            STRIPE_PRICE_BUSINESS="price_biz_real",
+            STRIPE_PRICE_ENTERPRISE="price_ent_real",
+            OPENAI_API_KEY="sk-real-openai-key-live",
+            REDIS_URL="redis://production-redis:6379/0",
+            DATABASE_URL="sqlite+aiosqlite:///dev.db",
+            CORS_ORIGINS=["https://app.hospitalityagent.cloud"]
+        )
+
+def test_x_request_id_sanitization(client):
+    """A5 Requirement: Inbound X-Request-ID must be sanitized against CRLF and injection attacks."""
+    malicious_header = "<script>alert('xss')</script>\r\nInjected-Header: evil"
+    res = client.get("/health", headers={"X-Request-ID": malicious_header})
+    assert res.status_code == 200
+    returned_request_id = res.headers.get("X-Request-ID")
+    assert returned_request_id is not None
+    assert "<script>" not in returned_request_id
+    assert "\r" not in returned_request_id
+    assert returned_request_id.startswith("req_")
+
+    valid_custom_id = "trace-custom-correlation-12345"
+    res2 = client.get("/health", headers={"X-Request-ID": valid_custom_id})
+    assert res2.headers.get("X-Request-ID") == valid_custom_id
+
+

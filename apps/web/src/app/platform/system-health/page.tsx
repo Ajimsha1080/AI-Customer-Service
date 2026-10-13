@@ -1,7 +1,7 @@
 'use client';
 import React, { useState, useEffect } from 'react';
 import { Activity, Server, Database, Cpu } from 'lucide-react';
-import { API_BASE } from '@/lib/api';
+import { API_BASE, authFetch } from '@/lib/api';
 
 export default function PlatformSystemHealthPage() {
   const [health, setHealth] = useState<any>({ status: 'healthy', environment: 'development' });
@@ -12,8 +12,8 @@ export default function PlatformSystemHealthPage() {
     async function loadHealth() {
       try {
         const [hRes, rRes] = await Promise.all([
-          fetch(`${API_BASE}/health`).then(r => r.ok ? r.json() : {}),
-          fetch(`${API_BASE}/ready`).then(r => r.ok ? r.json() : {})
+          authFetch('/health').then(r => r.ok ? r.json() : {}),
+          authFetch('/ready').then(r => r.ok ? r.json() : {})
         ]);
         if (hRes) setHealth(hRes);
         if (rRes) setReady(rRes);
