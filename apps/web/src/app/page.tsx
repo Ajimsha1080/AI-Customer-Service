@@ -21,6 +21,7 @@ export default function LandingPage() {
         <div className="flex items-center gap-6 text-sm font-medium text-zinc-600">
           <Link href="/app/dashboard" className="hover:text-zinc-900 transition-colors">SaaS Portal</Link>
           <Link href="/platform/dashboard" className="hover:text-zinc-900 transition-colors">Super Admin</Link>
+          <Link href="/status" className="hover:text-zinc-900 transition-colors">Status</Link>
           <Link href="/guest/agt_concierge_01" className="hover:text-zinc-900 transition-colors">Guest Concierge</Link>
           <Link href="/app/dashboard" className="yc-btn-primary">
             Launch Main Portal →
