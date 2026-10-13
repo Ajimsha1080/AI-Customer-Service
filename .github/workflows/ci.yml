@@ -39,9 +39,32 @@ jobs:
         run: |
           pytest tests/ -v
 
+  web-check:
+    name: Check Next.js Frontend
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: apps/web/package.json
+
+      - name: Install dependencies
+        working-directory: apps/web
+        run: npm ci
+
+      - name: Verify TypeScript compilation
+        working-directory: apps/web
+        run: npx tsc --noEmit
+
   deploy:
     name: Build & Deploy Container Stack
-    needs: test
+    needs: [test, web-check]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
 
