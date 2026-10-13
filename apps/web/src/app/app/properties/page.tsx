@@ -1,5 +1,5 @@
 'use client';
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import { 
   Building2, Plus, Bot, MapPin, CheckCircle2, ChevronRight, Sparkles, Loader2, BedDouble, Utensils, Waves, Calendar, Tag, ShieldCheck 
@@ -31,7 +31,7 @@ export default function AppPropertiesPage() {
   const [itemPrice, setItemPrice] = useState('100');
   const [creatingItem, setCreatingItem] = useState(false);
 
-  const loadProperties = async () => {
+  const loadProperties = useCallback(async () => {
     setLoading(true);
     try {
       const sess = await getCurrentSession();
@@ -42,8 +42,8 @@ export default function AppPropertiesPage() {
           const data = await res.json();
           const list = Array.isArray(data) ? data : [];
           setProperties(list);
-          if (list.length > 0 && !selectedProperty) {
-            setSelectedProperty(list[0]);
+          if (list.length > 0) {
+            setSelectedProperty((prev: any) => prev || list[0]);
           }
         }
       }
@@ -52,13 +52,13 @@ export default function AppPropertiesPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     loadProperties();
-  }, []);
+  }, [loadProperties]);
 
-  const loadSubItems = async (propId: string, tab: string) => {
+  const loadSubItems = useCallback(async (propId: string, tab: string) => {
     if (!session?.organization_id || !propId) return;
     setSubLoading(true);
     try {
@@ -75,13 +75,13 @@ export default function AppPropertiesPage() {
     } finally {
       setSubLoading(false);
     }
-  };
+  }, [session?.organization_id]);
 
   useEffect(() => {
     if (selectedProperty) {
       loadSubItems(selectedProperty.id, subTab);
     }
-  }, [selectedProperty, subTab]);
+  }, [selectedProperty, subTab, loadSubItems]);
 
   const handleCreateProperty = async (e: React.FormEvent) => {
     e.preventDefault();

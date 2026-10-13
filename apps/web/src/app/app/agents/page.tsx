@@ -1,5 +1,5 @@
 'use client';
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import { Bot, Play, CheckCircle2, Code, Sparkles, Copy, Check, Loader2, Plus, ExternalLink } from 'lucide-react';
 import { authFetch, getCurrentSession, API_BASE } from '@/lib/api';
@@ -16,7 +16,7 @@ export default function AppAgentsPage() {
   const [agentName, setAgentName] = useState('Front Desk AI Concierge');
   const [creating, setCreating] = useState(false);
 
-  const loadAgents = async () => {
+  const loadAgents = useCallback(async () => {
     setLoading(true);
     try {
       const sess = await getCurrentSession();
@@ -27,8 +27,8 @@ export default function AppAgentsPage() {
           const data = await res.json();
           const list = Array.isArray(data) ? data : [];
           setAgents(list);
-          if (list.length > 0 && !selectedAgent) {
-            setSelectedAgent(list[0]);
+          if (list.length > 0) {
+            setSelectedAgent((prev: any) => prev || list[0]);
           }
         }
       }
@@ -37,11 +37,11 @@ export default function AppAgentsPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     loadAgents();
-  }, []);
+  }, [loadAgents]);
 
   const handleCreateAgent = async (e: React.FormEvent) => {
     e.preventDefault();

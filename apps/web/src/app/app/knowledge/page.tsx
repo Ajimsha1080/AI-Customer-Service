@@ -1,5 +1,5 @@
 'use client';
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Upload, FileText, Trash2, Search, BookOpen, Sparkles, ExternalLink, Plus, Eye, Loader2, CheckCircle2 } from 'lucide-react';
 import { authFetch, getCurrentSession } from '@/lib/api';
 
@@ -26,7 +26,7 @@ export default function AppKnowledgeBasePage() {
     setTimeout(() => setToastMessage(null), 4000);
   };
 
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     setLoading(true);
     try {
       const sess = await getCurrentSession();
@@ -46,19 +46,19 @@ export default function AppKnowledgeBasePage() {
           const propsData = await propsRes.json();
           const pList = Array.isArray(propsData) ? propsData : [];
           setProperties(pList);
-          if (pList.length > 0 && !selectedPropertyId) {
-            setSelectedPropertyId(pList[0].id);
+          if (pList.length > 0) {
+            setSelectedPropertyId(prev => prev || pList[0].id);
           }
         }
       }
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     loadData();
-  }, []);
+  }, [loadData]);
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files || !e.target.files[0]) return;

@@ -1,5 +1,5 @@
 'use client';
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { MessageSquare, User, Bot, CheckCircle2, AlertCircle, PhoneCall, Send, ShieldAlert, Tag, UserCheck, Loader2 } from 'lucide-react';
 import { API_BASE, authFetch, getCurrentSession } from '@/lib/api';
 
@@ -13,7 +13,7 @@ export default function AppConversationsInboxPage() {
   const [session, setSession] = useState<any>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
 
-  const loadConversations = async () => {
+  const loadConversations = useCallback(async () => {
     try {
       const sess = await getCurrentSession();
       setSession(sess);
@@ -22,9 +22,14 @@ export default function AppConversationsInboxPage() {
         const data = await res.json();
         if (Array.isArray(data)) {
           setConversations(data);
-          if (data.length > 0 && !selectedConv) {
-            setSelectedConv(data[0].id);
-            setIsHumanTakeover(data[0].status === 'HUMAN_STAFF_TAKEN_OVER' || data[0].is_human_takeover);
+          if (data.length > 0) {
+            setSelectedConv(prev => {
+              if (!prev) {
+                setIsHumanTakeover(data[0].status === 'HUMAN_STAFF_TAKEN_OVER' || data[0].is_human_takeover);
+                return data[0].id;
+              }
+              return prev;
+            });
           }
         }
       }
@@ -33,11 +38,11 @@ export default function AppConversationsInboxPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     loadConversations();
-  }, []);
+  }, [loadConversations]);
 
   const loadMessages = async (convId: string) => {
     if (!convId) return;
@@ -105,7 +110,7 @@ export default function AppConversationsInboxPage() {
         eventSourceRef.current.close();
       }
     };
-  }, [selectedConv]);
+  }, [selectedConv, loadConversations]);
 
   const activeConv = conversations.find(c => c.id === selectedConv) || (conversations.length > 0 ? conversations[0] : null);
 
