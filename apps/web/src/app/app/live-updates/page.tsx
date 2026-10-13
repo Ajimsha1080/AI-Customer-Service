@@ -380,7 +380,7 @@ export default function AppLiveUpdatesPage() {
 
             <div className="space-y-3">
               <div className="flex items-center justify-between">
-                <h3 className="text-xs font-bold text-zinc-900 uppercase tracking-wider">Today's Menu</h3>
+                <h3 className="text-xs font-bold text-zinc-900 uppercase tracking-wider">Today&apos;s Menu</h3>
                 <span className="text-[10px] font-mono text-zinc-400">{foodTimings.lastUpdated}</span>
               </div>
               <div className="p-4 bg-zinc-50 border border-zinc-200 rounded-xl text-xs text-zinc-800 font-medium">
@@ -723,14 +723,14 @@ export default function AppLiveUpdatesPage() {
         <div className="fixed inset-0 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-2xl max-w-md w-full p-6 space-y-4 shadow-xl">
             <div className="flex items-center justify-between border-b border-zinc-200 pb-3">
-              <h3 className="text-sm font-bold text-zinc-900">Update Today's Mess Menu</h3>
+              <h3 className="text-sm font-bold text-zinc-900">Update Today&apos;s Mess Menu</h3>
               <button onClick={() => setIsMenuModalOpen(false)} className="text-zinc-400 hover:text-zinc-600">
                 <X className="w-4 h-4" />
               </button>
             </div>
 
             <div className="space-y-3 text-xs">
-              <label className="font-semibold text-zinc-700 block">Today's Menu Items:</label>
+              <label className="font-semibold text-zinc-700 block">Today&apos;s Menu Items:</label>
               <textarea
                 value={editMenu}
                 onChange={(e) => setEditMenu(e.target.value)}
@@ -885,7 +885,7 @@ export default function AppLiveUpdatesPage() {
                       <option value="nobody">○ Disabled / Restricted</option>
                       <option value="admin_only">○ Admin Only</option>
                       <option value="staff_only">○ Staff Only</option>
-                      <option value="own_data">○ Resident's Own Data</option>
+                      <option value="own_data">○ Resident&apos;s Own Data</option>
                       <option value="all_residents">○ All Authenticated Residents</option>
                     </select>
 

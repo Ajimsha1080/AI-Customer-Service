@@ -291,7 +291,7 @@ export default function AppKnowledgeBasePage() {
               {filteredDocs.length === 0 ? (
                 <tr>
                   <td colSpan={6} className="py-8 text-center text-zinc-400 text-xs font-mono">
-                    No items in this category yet. Click "+ Add Knowledge" to add rules, FAQs, or documents.
+                    No items in this category yet. Click &quot;+ Add Knowledge&quot; to add rules, FAQs, or documents.
                   </td>
                 </tr>
               ) : (

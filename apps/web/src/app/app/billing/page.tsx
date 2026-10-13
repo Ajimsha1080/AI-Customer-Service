@@ -38,7 +38,7 @@ export default function AppBillingPage() {
       }
     }
     fetchSubscriptionData();
-  }, [API_BASE]);
+  }, []);
 
   const handleStripeCheckout = async (targetPlan: string) => {
     setUpgrading(true);

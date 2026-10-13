@@ -45,7 +45,7 @@ export default function TermsOfServicePage() {
         <div className="space-y-8 bg-white p-8 rounded-2xl border border-zinc-200 shadow-xs leading-relaxed text-sm text-zinc-700">
           <section className="space-y-3">
             <p>
-              Welcome to <strong>Hospitality Agent Cloud</strong> ("Platform", "we", "us", or "our"). By creating an account, subscribing to our services, or deploying AI digital concierges, you ("Customer", "Subscriber") agree to be bound by these Terms of Service ("Terms").
+              Welcome to <strong>Hospitality Agent Cloud</strong> (&quot;Platform&quot;, &quot;we&quot;, &quot;us&quot;, or &quot;our&quot;). By creating an account, subscribing to our services, or deploying AI digital concierges, you (&quot;Customer&quot;, &quot;Subscriber&quot;) agree to be bound by these Terms of Service (&quot;Terms&quot;).
             </p>
           </section>
 
@@ -94,7 +94,7 @@ export default function TermsOfServicePage() {
               4. Limitation of Liability
             </h2>
             <p>
-              Hospitality Agent Cloud is provided "AS IS" without warranties of uninterrupted operation. Maximum aggregate liability is capped at the total fees paid by Customer in the 12 months preceding the claim.
+              Hospitality Agent Cloud is provided &quot;AS IS&quot; without warranties of uninterrupted operation. Maximum aggregate liability is capped at the total fees paid by Customer in the 12 months preceding the claim.
             </p>
           </section>
         </div>

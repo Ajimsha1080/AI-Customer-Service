@@ -160,19 +160,19 @@ export default function SaaSUserDashboard() {
 
         <div className="space-y-2 text-xs font-mono">
           <div className="p-3 bg-zinc-50 rounded-xl border border-zinc-200 flex items-center justify-between">
-            <span className="text-zinc-700 font-bold">Resident asked: "What's for dinner today?"</span>
-            <span className="text-emerald-600 font-semibold">→ Queried Live Data (Menu & Timings)</span>
+            <span className="text-zinc-700 font-bold">Resident asked: &quot;What&apos;s for dinner today?&quot;</span>
+            <span className="text-emerald-600 font-semibold">→ Queried Live Data (Menu &amp; Timings)</span>
             <span className="text-zinc-400 text-[11px]">2 mins ago</span>
           </div>
 
           <div className="p-3 bg-zinc-50 rounded-xl border border-zinc-200 flex items-center justify-between">
-            <span className="text-zinc-700 font-bold">Resident asked: "The fan in my room isn't working."</span>
+            <span className="text-zinc-700 font-bold">Resident asked: &quot;The fan in my room isn&apos;t working.&quot;</span>
             <span className="text-amber-600 font-semibold">→ Created Ticket MNT-10492</span>
             <span className="text-zinc-400 text-[11px]">15 mins ago</span>
           </div>
 
           <div className="p-3 bg-zinc-50 rounded-xl border border-zinc-200 flex items-center justify-between">
-            <span className="text-zinc-700 font-bold">Resident asked: "What are the visitor rules?"</span>
+            <span className="text-zinc-700 font-bold">Resident asked: &quot;What are the visitor rules?&quot;</span>
             <span className="text-blue-600 font-semibold">→ Queried Knowledge RAG (Rules Doc)</span>
             <span className="text-zinc-400 text-[11px]">45 mins ago</span>
           </div>

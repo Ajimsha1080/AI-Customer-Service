@@ -74,7 +74,7 @@ export default function LandingPage() {
             </div>
             <h3 className="text-xl font-bold text-zinc-900 mb-2">Real-Time Data Routing</h3>
             <p className="text-sm text-zinc-600 leading-relaxed">
-              Dynamic tool routing for live pool status, current room pricing, today's activities, and instant property announcements to eliminate hallucinations.
+              Dynamic tool routing for live pool status, current room pricing, today&apos;s activities, and instant property announcements to eliminate hallucinations.
             </p>
           </div>
 

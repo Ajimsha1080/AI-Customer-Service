@@ -68,7 +68,7 @@ export default function OnboardingWizardPage() {
         <div className="yc-badge mb-2">
           <span>✨ Welcome to Hospitality Agent Cloud</span>
         </div>
-        <h1 className="text-2xl font-bold text-zinc-900">Let's launch your first AI concierge.</h1>
+        <h1 className="text-2xl font-bold text-zinc-900">Let&apos;s launch your first AI concierge.</h1>
         <p className="text-xs text-zinc-600">Complete this 6-step guided wizard to deploy an AI agent for your property in under 3 minutes.</p>
       </div>
 
@@ -210,8 +210,8 @@ export default function OnboardingWizardPage() {
             </div>
 
             <div className="p-4 bg-zinc-50 border border-zinc-200 rounded-lg text-xs space-y-2">
-              <p className="font-semibold text-zinc-900">Test Query: "Is the swimming pool open now?"</p>
-              <p className="text-zinc-600 italic">Agent Response: "The Infinity Swimming Pool is currently Open (06:00 AM - 08:00 PM)."</p>
+              <p className="font-semibold text-zinc-900">Test Query: &quot;Is the swimming pool open now?&quot;</p>
+              <p className="text-zinc-600 italic">Agent Response: &quot;The Infinity Swimming Pool is currently Open (06:00 AM - 08:00 PM).&quot;</p>
             </div>
           </div>
         )}
