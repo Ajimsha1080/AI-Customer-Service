@@ -77,3 +77,11 @@ async def metrics(
         "total_conversations": total_conversations,
         "system_status": "OPERATIONAL"
     }
+
+@router.get("/db-health")
+async def db_health(
+    current_user: User = Depends(get_super_admin_user)
+):
+    """0.7 / 3.0 Protected db-health: Super Admin authorization required."""
+    from services.database.session import check_db_health
+    return await check_db_health()

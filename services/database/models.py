@@ -186,7 +186,7 @@ class Room(Base):
     __tablename__ = "rooms"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
-    organization_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=True, index=True)
+    organization_id: Mapped[str] = mapped_column(String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
     property_id: Mapped[str] = mapped_column(String(36), ForeignKey("properties.id", ondelete="CASCADE"), nullable=False, index=True)
     room_number: Mapped[str] = mapped_column(String(50), nullable=False)
     room_type: Mapped[str] = mapped_column(String(100), nullable=False)
@@ -201,7 +201,7 @@ class Facility(Base):
     __tablename__ = "facilities"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
-    organization_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=True, index=True)
+    organization_id: Mapped[str] = mapped_column(String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
     property_id: Mapped[str] = mapped_column(String(36), ForeignKey("properties.id", ondelete="CASCADE"), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[str] = mapped_column(String(100), default="Open")
@@ -215,7 +215,7 @@ class Restaurant(Base):
     __tablename__ = "restaurants"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
-    organization_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=True, index=True)
+    organization_id: Mapped[str] = mapped_column(String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
     property_id: Mapped[str] = mapped_column(String(36), ForeignKey("properties.id", ondelete="CASCADE"), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     cuisine: Mapped[str] = mapped_column(String(100), default="Multicuisine")
@@ -239,7 +239,7 @@ class Activity(Base):
     __tablename__ = "activities"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
-    organization_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=True, index=True)
+    organization_id: Mapped[str] = mapped_column(String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
     property_id: Mapped[str] = mapped_column(String(36), ForeignKey("properties.id", ondelete="CASCADE"), nullable=False, index=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
@@ -338,7 +338,7 @@ class Reservation(Base):
     __tablename__ = "reservations"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
-    organization_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=True, index=True)
+    organization_id: Mapped[str] = mapped_column(String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
     property_id: Mapped[str] = mapped_column(String(36), ForeignKey("properties.id", ondelete="CASCADE"), nullable=False, index=True)
     room_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("rooms.id", ondelete="SET NULL"), nullable=True)
     rate_plan_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("rate_plans.id", ondelete="SET NULL"), nullable=True)

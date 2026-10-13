@@ -56,7 +56,8 @@ class GoogleAuthCallbackRequest(BaseModel):
     redirect_uri: Optional[str] = "http://localhost:3002/auth/callback/google"
 
 @router.post("/register")
-async def register(req: RegisterRequest, response: Response, db: AsyncSession = Depends(get_db)):
+@limiter.limit("10/minute")
+async def register(request: Request, req: RegisterRequest, response: Response, db: AsyncSession = Depends(get_db)):
     """Registers a new tenant. ALWAYS provisions a brand-new Organization with a server-generated slug.
     The creator is designated as the tenant OWNER.
     """
@@ -210,7 +211,8 @@ async def accept_invitation(req: AcceptInvitationRequest, response: Response, db
     }
 
 @router.post("/login")
-async def login(req: LoginRequest, response: Response, db: AsyncSession = Depends(get_db)):
+@limiter.limit("5/minute")
+async def login(request: Request, req: LoginRequest, response: Response, db: AsyncSession = Depends(get_db)):
     check_login_lockout(req.email)
     stmt = select(User).where(User.email == req.email)
     res = await db.execute(stmt)

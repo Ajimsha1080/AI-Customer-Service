@@ -18,8 +18,14 @@ async def init_db():
                 except Exception as ve:
                     print(f"pgvector extension warning: {ve}")
             await conn.run_sync(Base.metadata.create_all)
+            if "postgresql" in settings.DATABASE_URL:
+                from services.security.rls import apply_rls_policies
+                await apply_rls_policies(conn)
+                print("✓ PostgreSQL multi-tenant Row-Level Security (RLS) policies applied.")
         print("✓ Enterprise database tables & indexes initialized successfully.")
     except Exception as e:
+        if settings.ENVIRONMENT.lower() in ("production", "prod"):
+            raise RuntimeError(f"Database initialization failed in production: {e}")
         print(f"PostgreSQL connection failed ({e}). Falling back to SQLite for local development...")
         sqlite_url = "sqlite+aiosqlite:///./dev_hospitality.db"
         sqlite_engine = create_async_engine(sqlite_url)

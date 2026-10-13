@@ -71,7 +71,9 @@ AsyncReadSessionLocal = async_sessionmaker(
 
 async def set_tenant_context(session: AsyncSession, tenant_id: str) -> None:
     """Enterprise Multi-Tenant Row-Level Security (RLS) Transaction Scope."""
-    if "postgresql" in str(session.bind.url):
+    bind = getattr(session, "bind", None)
+    url_str = str(bind.url) if bind and hasattr(bind, "url") else settings.DATABASE_URL
+    if "postgresql" in url_str:
         await session.execute(text("SET LOCAL app.current_tenant_id = :tenant_id"), {"tenant_id": tenant_id})
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
