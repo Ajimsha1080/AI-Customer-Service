@@ -58,6 +58,7 @@ class Settings(BaseSettings):
     AWS_REGION: str = "us-east-1"
 
     SENTRY_DSN: Optional[str] = None
+    ALERT_WEBHOOK_URL: Optional[str] = None
 
     LANGSMITH_TRACING: str = "false"
     LANGSMITH_API_KEY: Optional[str] = "mock-langsmith-key"

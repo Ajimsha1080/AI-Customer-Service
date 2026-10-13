@@ -53,6 +53,22 @@ async def readiness_check(db: AsyncSession = Depends(get_db)):
         vector_status = "degraded"
 
     overall_ready = (db_status == "connected" and redis_status == "connected")
+    if not overall_ready and settings.ALERT_WEBHOOK_URL:
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                await client.post(
+                    settings.ALERT_WEBHOOK_URL,
+                    json={
+                        "text": f"🚨 [Hospitality SaaS Alert] /ready probe degraded! DB: {db_status}, Redis: {redis_status}, Vector: {vector_status}",
+                        "service": settings.PROJECT_NAME,
+                        "environment": settings.ENVIRONMENT,
+                        "timestamp": datetime.now(timezone.utc).isoformat()
+                    }
+                )
+        except Exception:
+            pass
+
     return {
         "status": "ready" if overall_ready else "degraded",
         "database": db_status,
