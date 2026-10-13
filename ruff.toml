@@ -1,0 +1,14 @@
+target-version = "py311"
+line-length = 140
+
+[lint]
+select = ["E9", "F"]
+ignore = [
+    "F401",  # unused import
+    "F403",  # star import
+    "F405",  # star import undefined
+    "F541",  # f-string without placeholder
+    "F811",  # redefinition
+    "F821",  # undefined name in dynamically executed contexts
+    "F841",  # unused variable
+]
