@@ -5,6 +5,7 @@ from typing import List, Optional
 from sqlalchemy import (
     Column, String, Text, Boolean, Integer, Float, DateTime, ForeignKey, Enum as SQLEnum, JSON, Numeric, Index
 )
+from pgvector.sqlalchemy import Vector
 from sqlalchemy.orm import relationship, Mapped, mapped_column
 from services.database.session import Base
 
@@ -156,6 +157,8 @@ class Document(Base):
     source_url: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     content_raw: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     content: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(50), default="INDEXED")
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=get_utc_now)
 
     agent = relationship("Agent", back_populates="documents")
@@ -170,7 +173,10 @@ class DocumentChunk(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
     document_id: Mapped[str] = mapped_column(String(36), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True)
     content: Mapped[str] = mapped_column(Text, nullable=False)
+    embedding = mapped_column(Vector(384), nullable=True)
     embedding_json: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    model: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, default="all-MiniLM-L6-v2")
+    dimension: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=384)
     metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=get_utc_now)
 
@@ -216,6 +222,16 @@ class Restaurant(Base):
     status: Mapped[str] = mapped_column(String(100), default="Open")
     menu_json: Mapped[list] = mapped_column(JSON, default=list)
     operating_hours: Mapped[str] = mapped_column(String(255), default="07:00 AM - 11:00 PM")
+    opening_time: Mapped[str] = mapped_column(String(50), default="07:00 AM")
+    closing_time: Mapped[str] = mapped_column(String(50), default="11:00 PM")
+
+    @property
+    def cuisine_type(self) -> str:
+        return self.cuisine
+
+    @cuisine_type.setter
+    def cuisine_type(self, value: str):
+        self.cuisine = value
 
     property = relationship("Property", back_populates="restaurants")
 
@@ -226,10 +242,16 @@ class Activity(Base):
     organization_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=True, index=True)
     property_id: Mapped[str] = mapped_column(String(36), ForeignKey("properties.id", ondelete="CASCADE"), nullable=False, index=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
+    name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    location: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, default="Resort Grounds")
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     time_slot: Mapped[str] = mapped_column(String(100), default="05:00 PM - 06:30 PM")
     price: Mapped[float] = mapped_column(Float, default=0.0)
     status: Mapped[str] = mapped_column(String(50), default="Scheduled")
+
+    @property
+    def activity_name(self) -> str:
+        return self.name or self.title
 
     property = relationship("Property", back_populates="activities")
 
@@ -282,6 +304,36 @@ class DataAccessPolicy(Base):
     updated_by: Mapped[str] = mapped_column(String(255), default="Hostel Admin")
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=get_utc_now)
 
+class RatePlan(Base):
+    __tablename__ = "rate_plans"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
+    organization_id: Mapped[str] = mapped_column(String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    property_id: Mapped[str] = mapped_column(String(36), ForeignKey("properties.id", ondelete="CASCADE"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    room_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    price_per_night: Mapped[float] = mapped_column(Float, nullable=False)
+    currency: Mapped[str] = mapped_column(String(10), default="USD")
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=get_utc_now)
+
+class Resident(Base):
+    __tablename__ = "residents"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
+    organization_id: Mapped[str] = mapped_column(String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    property_id: Mapped[str] = mapped_column(String(36), ForeignKey("properties.id", ondelete="CASCADE"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    room_number: Mapped[str] = mapped_column(String(50), nullable=False)
+    block: Mapped[str] = mapped_column(String(50), default="Block A")
+    status: Mapped[str] = mapped_column(String(50), default="ACTIVE")
+    fee_status: Mapped[str] = mapped_column(String(50), default="PAID")
+    check_in_date: Mapped[str] = mapped_column(String(50), default="2026-01-15")
+    phone: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    emergency_contact: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=get_utc_now)
+
 class Reservation(Base):
     __tablename__ = "reservations"
 
@@ -289,6 +341,7 @@ class Reservation(Base):
     organization_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=True, index=True)
     property_id: Mapped[str] = mapped_column(String(36), ForeignKey("properties.id", ondelete="CASCADE"), nullable=False, index=True)
     room_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("rooms.id", ondelete="SET NULL"), nullable=True)
+    rate_plan_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("rate_plans.id", ondelete="SET NULL"), nullable=True)
     customer_name: Mapped[str] = mapped_column(String(255), nullable=False)
     customer_email: Mapped[str] = mapped_column(String(255), nullable=False)
     check_in: Mapped[str] = mapped_column(String(50), nullable=False)
@@ -341,13 +394,24 @@ class SupportTicket(Base):
     __tablename__ = "support_tickets"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
-    conversation_id: Mapped[str] = mapped_column(String(36), ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False, index=True)
+    organization_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=True, index=True)
     property_id: Mapped[str] = mapped_column(String(36), ForeignKey("properties.id", ondelete="CASCADE"), nullable=False, index=True)
+    conversation_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("conversations.id", ondelete="CASCADE"), nullable=True, index=True)
+    category: Mapped[str] = mapped_column(String(100), default="General")
+    room_number: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     issue_summary: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(50), default="OPEN")
     priority: Mapped[str] = mapped_column(String(20), default="HIGH")
     assigned_to_user_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=get_utc_now)
+
+    @property
+    def description(self) -> str:
+        return self.issue_summary
+
+    @description.setter
+    def description(self, value: str):
+        self.issue_summary = value
 
 class VoiceSession(Base):
     __tablename__ = "voice_sessions"

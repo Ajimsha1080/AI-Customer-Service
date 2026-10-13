@@ -3,7 +3,7 @@ import asyncio
 from sqlalchemy import select
 from services.agent_runtime.tools import HospitalityToolRegistry
 from services.database.session import AsyncSessionLocal
-from services.database.models import Reservation
+from services.database.models import Reservation, Room, Property
 
 @pytest.mark.asyncio
 async def test_reservation_lifecycle_and_db_persistence():
@@ -11,6 +11,27 @@ async def test_reservation_lifecycle_and_db_persistence():
     org_id = "org_azure_group"
     prop_id = "prop_azure_palm_resort"
     enabled_tools = ["create_booking", "modify_booking", "cancel_booking", "check_room_availability"]
+
+    # Seed room so real inventory exists
+    async with AsyncSessionLocal() as session:
+        prop = await session.get(Property, prop_id)
+        if not prop:
+            prop = Property(id=prop_id, organization_id=org_id, name="Azure Palm Resort")
+            session.add(prop)
+        room_stmt = select(Room).where(Room.property_id == prop_id, Room.room_number == "101")
+        res_r = await session.execute(room_stmt)
+        if not res_r.scalar_one_or_none():
+            room = Room(
+                id="room_101",
+                organization_id=org_id,
+                property_id=prop_id,
+                room_number="101",
+                room_type="Single Bed Room",
+                price_per_night=120.0,
+                is_available=True
+            )
+            session.add(room)
+        await session.commit()
 
     # 1. Create booking
     book_res = await registry.execute_tool(

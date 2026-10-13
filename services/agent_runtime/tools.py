@@ -1,55 +1,89 @@
 import json
 import uuid
 from typing import Dict, Any, List, Optional
-from datetime import datetime
-from sqlalchemy import select
+from datetime import datetime, date
+from sqlalchemy import select, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from services.database.session import AsyncSessionLocal
 from services.database.models import (
-    Property, Room, Facility, LiveUpdate, Reservation, Restaurant, Activity, Conversation, DataAccessPolicy, SupportTicket
+    Property, Room, Facility, LiveUpdate, Reservation, Restaurant, Activity, Conversation, DataAccessPolicy, SupportTicket, Resident, RatePlan
 )
 
+CATEGORY_ALIASES = {
+    "resident_profile": "resident_room_info",
+    "room_information": "resident_room_info",
+    "food_menu": "food_menu_timings",
+    "facilities": "facilities_availability",
+    "payments_fees": "payment_info",
+    "attendance": "attendance_records",
+    "staff_information": "staff_personal_info",
+    "bookings": "reservations"
+}
+
 TOOL_CATEGORY_MAP = {
-    "get_resident_info": "resident_profile",
-    "getResidentInfo": "resident_profile",
-    "get_room_details": "room_information",
-    "getRoomInfo": "room_information",
-    "get_room_info": "room_information",
-    "get_food_menu": "food_menu",
-    "getFoodMenu": "food_menu",
+    "get_resident_info": "resident_room_info",
+    "getResidentInfo": "resident_room_info",
+    "get_room_details": "resident_room_info",
+    "getRoomInfo": "resident_room_info",
+    "get_room_info": "resident_room_info",
+    "get_current_room_price": "resident_room_info",
+    "get_food_menu": "food_menu_timings",
+    "getFoodMenu": "food_menu_timings",
+    "get_meal_timing": "food_menu_timings",
+    "getMealTiming": "food_menu_timings",
+    "get_restaurant_status": "food_menu_timings",
+    "get_restaurant_menu": "food_menu_timings",
     "get_notices": "notices",
     "getNotices": "notices",
     "get_current_notices": "notices",
     "getCurrentNotices": "notices",
-    "get_facility_status": "facilities",
+    "get_current_property_updates": "notices",
+    "get_facility_status": "facilities_availability",
+    "get_today_activities": "facilities_availability",
     "get_maintenance_status": "maintenance_requests",
     "getMaintenanceStatus": "maintenance_requests",
     "create_maintenance_request": "maintenance_requests",
     "createMaintenanceRequest": "maintenance_requests",
+    "create_service_request": "maintenance_requests",
+    "create_support_ticket": "maintenance_requests",
     "get_request_status": "maintenance_requests",
     "getRequestStatus": "maintenance_requests",
-    "get_payment_info": "payments_fees",
-    "get_attendance_records": "attendance",
+    "get_payment_info": "payment_info",
+    "get_attendance_records": "attendance_records",
+    "get_staff_info": "staff_personal_info",
+    "check_room_availability": "reservations",
+    "create_booking": "reservations",
+    "modify_booking": "reservations",
+    "cancel_booking": "reservations",
     "get_reservations": "reservations",
     "get_reservation_status": "reservations",
-    "getReservationStatus": "reservations",
-    "get_staff_info": "staff_information"
+    "getReservationStatus": "reservations"
 }
 
 DEFAULT_POLICIES = {
+    "resident_room_info": {
+        "enabled": True,
+        "user_scope": "own_data",
+        "field_permissions": {"name": True, "room_number": True, "phone_number": False, "email": False, "address": False, "id_information": False}
+    },
     "resident_profile": {
-        "enabled": False,
-        "user_scope": "nobody",
+        "enabled": True,
+        "user_scope": "own_data",
         "field_permissions": {"name": True, "room_number": True, "phone_number": False, "email": False, "address": False, "id_information": False}
     },
     "room_information": {"enabled": True, "user_scope": "own_data", "field_permissions": {}},
+    "food_menu_timings": {"enabled": True, "user_scope": "all_residents", "field_permissions": {}},
     "food_menu": {"enabled": True, "user_scope": "all_residents", "field_permissions": {}},
-    "notices": {"enabled": True, "user_scope": "all_residents", "field_permissions": {}},
+    "facilities_availability": {"enabled": True, "user_scope": "all_residents", "field_permissions": {}},
     "facilities": {"enabled": True, "user_scope": "all_residents", "field_permissions": {}},
+    "notices": {"enabled": True, "user_scope": "all_residents", "field_permissions": {}},
     "maintenance_requests": {"enabled": True, "user_scope": "own_data", "field_permissions": {}},
+    "reservations": {"enabled": True, "user_scope": "all_residents", "field_permissions": {}},
+    "payment_info": {"enabled": False, "user_scope": "nobody", "field_permissions": {}},
     "payments_fees": {"enabled": False, "user_scope": "nobody", "field_permissions": {}},
+    "attendance_records": {"enabled": False, "user_scope": "nobody", "field_permissions": {}},
     "attendance": {"enabled": False, "user_scope": "nobody", "field_permissions": {}},
-    "reservations": {"enabled": False, "user_scope": "nobody", "field_permissions": {}},
+    "staff_personal_info": {"enabled": False, "user_scope": "nobody", "field_permissions": {}},
     "staff_information": {"enabled": False, "user_scope": "nobody", "field_permissions": {}}
 }
 
@@ -211,13 +245,17 @@ class HospitalityToolRegistry:
     async def get_category_policy(self, organization_id: str, property_id: str, category_key: str) -> Dict[str, Any]:
         """Fetch saved DataAccessPolicy from DB or return safe default."""
         try:
+            canonical_key = CATEGORY_ALIASES.get(category_key, category_key)
+            keys_to_check = list(set([canonical_key, category_key]))
             async with self._session_scope() as session:
                 stmt = select(DataAccessPolicy).where(
                     DataAccessPolicy.organization_id == organization_id,
-                    DataAccessPolicy.category_key == category_key
+                    DataAccessPolicy.category_key.in_(keys_to_check)
                 )
+                if property_id:
+                    stmt = stmt.where(DataAccessPolicy.property_id == property_id)
                 res = await session.execute(stmt)
-                pol = res.scalar_one_or_none()
+                pol = res.scalars().first()
                 if pol:
                     return {
                         "category_key": pol.category_key,
@@ -229,7 +267,7 @@ class HospitalityToolRegistry:
         except Exception as e:
             print("Policy lookup warning:", str(e))
             pass
-        return DEFAULT_POLICIES.get(category_key, {"enabled": False, "user_scope": "nobody", "field_permissions": {}})
+        return DEFAULT_POLICIES.get(category_key, DEFAULT_POLICIES.get(CATEGORY_ALIASES.get(category_key, ""), {"enabled": False, "user_scope": "nobody", "field_permissions": {}}))
 
     async def execute_tool(
         self,
@@ -343,8 +381,8 @@ class HospitalityToolRegistry:
                         result.pop("customer_email", None)
                     if not field_perms.get("address", False):
                         result.pop("address", None)
-                    if not field_perms.get("id_information", False):
-                        result.pop("id_information", None)
+            if isinstance(result, dict) and result.get("success") is False:
+                return {"success": False, "tool": tool_name, "error": result.get("error", "Tool execution failed"), "status": result.get("status")}
 
             return {"success": True, "tool": tool_name, "result": result}
         except Exception as e:
@@ -382,28 +420,52 @@ class HospitalityToolRegistry:
         return await self.tool_get_live_hostel_data(args, organization_id, property_id)
 
     async def tool_get_resident_info(self, args: Dict[str, Any], organization_id: str, property_id: str) -> Dict[str, Any]:
-        resident_id = args.get("resident_id", "res_default_1")
-        return {
-            "resident_id": resident_id,
-            "name": "Alex Johnson",
-            "room_number": "304",
-            "hostel_block": "Block A",
-            "fee_status": "PAID",
-            "check_in_date": "2026-01-15",
-            "emergency_contact": "+1 (555) 234-5678"
-        }
+        resident_id = args.get("resident_id")
+        async with self._session_scope() as session:
+            stmt = select(Resident).where(
+                Resident.organization_id == organization_id,
+                Resident.property_id == property_id
+            )
+            if resident_id:
+                stmt = stmt.where(
+                    (Resident.id == resident_id) |
+                    (Resident.room_number == resident_id) |
+                    (Resident.name.ilike(f"%{resident_id}%"))
+                )
+            res = await session.execute(stmt)
+            resident = res.scalars().first()
+            if resident:
+                return {
+                    "resident_id": resident.id,
+                    "name": resident.name,
+                    "room_number": resident.room_number,
+                    "hostel_block": resident.block,
+                    "fee_status": resident.fee_status,
+                    "check_in_date": resident.check_in_date,
+                    "phone": resident.phone,
+                    "emergency_contact": resident.emergency_contact
+                }
+            return {
+                "status": "RESIDENT_NOT_FOUND",
+                "message": f"No resident record found for '{resident_id or 'unknown'}'. Please check with hostel front desk."
+            }
 
     async def tool_getResidentInfo(self, args: Dict[str, Any], organization_id: str, property_id: str) -> Dict[str, Any]:
         return await self.tool_get_resident_info(args, organization_id, property_id)
 
     async def tool_create_maintenance_request(self, args: Dict[str, Any], organization_id: str, property_id: str) -> Dict[str, Any]:
         ticket_id = f"MNT-{uuid.uuid4().hex[:6].upper()}"
-        summary = f"Room {args.get('room_number', '304')} - {args.get('category', 'General Maintenance')}: {args.get('description', 'Issue reported by resident')}"
+        room_number = args.get("room_number")
+        category = args.get("category", "General Maintenance")
+        desc = args.get("issue_description") or args.get("description") or "Issue reported by resident"
+        summary = desc
         async with self._session_scope() as session:
             ticket = SupportTicket(
                 id=ticket_id,
-                conversation_id=f"conv_{int(datetime.now().timestamp())}",
+                organization_id=organization_id,
                 property_id=property_id,
+                category=category,
+                room_number=room_number,
                 issue_summary=summary,
                 status="OPEN",
                 priority="HIGH"
@@ -412,9 +474,9 @@ class HospitalityToolRegistry:
             await session.commit()
             return {
                 "ticket_id": ticket_id,
-                "category": args.get("category", "General Maintenance"),
-                "description": args.get("description", "Issue reported by resident"),
-                "room_number": args.get("room_number", "304"),
+                "category": category,
+                "description": desc,
+                "room_number": room_number or "Unspecified",
                 "status": "DISPATCHED",
                 "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             }
@@ -423,9 +485,14 @@ class HospitalityToolRegistry:
         return await self.tool_create_maintenance_request(args, organization_id, property_id)
 
     async def tool_get_request_status(self, args: Dict[str, Any], organization_id: str, property_id: str) -> Dict[str, Any]:
-        ticket_id = args.get("ticket_id", "MNT-DEFAULT")
+        ticket_id = args.get("ticket_id")
+        if not ticket_id:
+            return {"status": "ERROR", "message": "ticket_id is required"}
         async with self._session_scope() as session:
-            stmt = select(SupportTicket).where(SupportTicket.id == ticket_id, SupportTicket.property_id == property_id)
+            stmt = select(SupportTicket).where(
+                SupportTicket.id == ticket_id,
+                SupportTicket.property_id == property_id
+            )
             res = await session.execute(stmt)
             tkt = res.scalar_one_or_none()
             if tkt:
@@ -433,53 +500,38 @@ class HospitalityToolRegistry:
                     "ticket_id": tkt.id,
                     "status": tkt.status,
                     "issue_summary": tkt.issue_summary,
-                    "assigned_technician": "Hostel Maintenance Staff",
+                    "category": getattr(tkt, "category", "Maintenance"),
                     "created_at": str(tkt.created_at)
                 }
-        return {
-            "ticket_id": ticket_id,
-            "status": "IN_PROGRESS",
-            "assigned_technician": "John Doe (Electrical/Plumbing)",
-            "estimated_completion": "Today before 5:00 PM"
-        }
+            return {
+                "ticket_id": ticket_id,
+                "status": "TICKET_NOT_FOUND",
+                "message": f"Support ticket '{ticket_id}' not found."
+            }
 
     async def tool_getRequestStatus(self, args: Dict[str, Any], organization_id: str, property_id: str) -> Dict[str, Any]:
         return await self.tool_get_request_status(args, organization_id, property_id)
 
     async def tool_get_notices(self, args: Dict[str, Any], organization_id: str, property_id: str) -> Dict[str, Any]:
         async with self._session_scope() as session:
-            stmt = select(LiveUpdate).where(LiveUpdate.property_id == property_id, LiveUpdate.is_active == True)
+            stmt = select(LiveUpdate).where(
+                LiveUpdate.property_id == property_id,
+                LiveUpdate.is_active == True
+            )
             res = await session.execute(stmt)
             notices = res.scalars().all()
-            
             active_notices = [
                 {
+                    "id": n.id,
                     "title": n.title,
                     "content": n.content,
                     "priority": getattr(n, "priority", "NORMAL"),
                     "status": "ACTIVE",
-                    "updated_at": "Updated just now"
+                    "updated_at": str(n.created_at)
                 }
                 for n in notices
             ]
-            if not active_notices:
-                active_notices = [
-                    {
-                        "title": "Main Gate Night Entry Timings Update",
-                        "content": "Hostel main gate closes strictly at 10:00 PM starting tonight. Late entries require Warden permission.",
-                        "priority": "HIGH",
-                        "status": "ACTIVE",
-                        "updated_at": "Updated today"
-                    },
-                    {
-                        "title": "Bi-Weekly Elevator Inspection Block A",
-                        "content": "Elevator 2 in Block A routine safety check tomorrow between 02:00 PM and 04:00 PM.",
-                        "priority": "NORMAL",
-                        "status": "ACTIVE",
-                        "updated_at": "Updated yesterday"
-                    }
-                ]
-            return {"active_notices": active_notices, "total_active": len(active_notices)}
+            return {"notices": active_notices, "active_notices": active_notices, "total_active": len(active_notices)}
 
     async def tool_getNotices(self, args: Dict[str, Any], organization_id: str, property_id: str) -> Dict[str, Any]:
         return await self.tool_get_notices(args, organization_id, property_id)
@@ -489,34 +541,45 @@ class HospitalityToolRegistry:
             stmt = select(Restaurant).where(Restaurant.property_id == property_id)
             res = await session.execute(stmt)
             rests = res.scalars().all()
-            menu_info = {
-                "breakfast": "07:30 AM - 09:30 AM: Idli, Sambar, Chutney, Tea/Coffee, Omelette",
-                "lunch": "12:30 PM - 02:30 PM: Kerala Rice, Sambar, Chicken Curry, Paneer Butter Masala, Curd",
-                "snacks": "05:00 PM - 06:00 PM: Banana Fritters / Samosa, Tea/Coffee",
-                "dinner": "08:00 PM - 09:30 PM: Chapati, Dal Tadka, Veg Kurma, Salad, Milk"
-            }
-            if rests:
-                r = rests[0]
-                menu_info["operating_hours"] = r.operating_hours
+            menu_info = {}
+            for r in rests:
+                menu_info[r.name] = {
+                    "cuisine": getattr(r, "cuisine", "Multicuisine"),
+                    "operating_hours": getattr(r, "operating_hours", "07:00 AM - 11:00 PM"),
+                    "menu": r.menu_json or []
+                }
             return {
                 "day": args.get("day", "Today"),
                 "meal_type": args.get("meal_type", "All Meals"),
-                "menu": menu_info
+                "menu": menu_info or {"message": "No restaurant menu configured for property."}
             }
 
     async def tool_getFoodMenu(self, args: Dict[str, Any], organization_id: str, property_id: str) -> Dict[str, Any]:
         return await self.tool_get_food_menu(args, organization_id, property_id)
 
     async def tool_escalate_to_staff(self, args: Dict[str, Any], organization_id: str, property_id: str) -> Dict[str, Any]:
-        urgency = args.get("urgency", "NORMAL")
+        urgency = args.get("urgency", "HIGH")
         message = args.get("message", "Resident requested staff assistance.")
-        return {
-            "status": "ESCALATED_TO_STAFF",
-            "urgency": urgency,
-            "message": message,
-            "assigned_warden": "Chief Hostel Warden / Warden Desk",
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        }
+        ticket_id = f"ESC-{uuid.uuid4().hex[:6].upper()}"
+        async with self._session_scope() as session:
+            ticket = SupportTicket(
+                id=ticket_id,
+                organization_id=organization_id,
+                property_id=property_id,
+                category="Staff Escalation",
+                issue_summary=f"Escalation ({urgency}): {message}",
+                status="OPEN",
+                priority=urgency
+            )
+            session.add(ticket)
+            await session.commit()
+            return {
+                "ticket_id": ticket_id,
+                "status": "ESCALATED_TO_STAFF",
+                "urgency": urgency,
+                "message": message,
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
 
     async def tool_escalateToStaff(self, args: Dict[str, Any], organization_id: str, property_id: str) -> Dict[str, Any]:
         return await self.tool_escalate_to_staff(args, organization_id, property_id)
@@ -571,24 +634,51 @@ class HospitalityToolRegistry:
             return {"status": "ROOM_TYPE_NOT_FOUND", "query": room_type}
 
     async def tool_check_room_availability(self, args: Dict[str, Any], organization_id: str, property_id: str) -> Dict[str, Any]:
-        check_in = args.get("check_in", "Today")
-        check_out = args.get("check_out", "Tomorrow")
+        check_in_str = args.get("check_in")
+        check_out_str = args.get("check_out")
+        room_type = args.get("room_type")
+
+        today = date.today()
+        if not check_in_str:
+            check_in_str = today.isoformat()
+        if not check_out_str:
+            from datetime import timedelta
+            check_out_str = (today + timedelta(days=1)).isoformat()
+
         async with self._session_scope() as session:
             stmt = select(Room).where(Room.property_id == property_id, Room.is_available == True)
+            if room_type:
+                stmt = stmt.where(Room.room_type.ilike(f"%{room_type}%"))
             res = await session.execute(stmt)
-            rooms = res.scalars().all()
+            all_rooms = res.scalars().all()
+
+            stmt_res = select(Reservation).where(
+                Reservation.property_id == property_id,
+                Reservation.status.in_(["CONFIRMED", "MODIFIED"])
+            )
+            res_reservations = await session.execute(stmt_res)
+            active_res = res_reservations.scalars().all()
+
+            occupied_room_ids = set()
+            for r in active_res:
+                if not (r.check_out <= check_in_str or r.check_in >= check_out_str):
+                    if r.room_id:
+                        occupied_room_ids.add(r.room_id)
+
+            available_rooms = [rm for rm in all_rooms if rm.id not in occupied_room_ids]
             available_list = [
                 {
+                    "room_id": r.id,
                     "room_number": r.room_number,
                     "room_type": r.room_type,
                     "rate_per_night": r.price_per_night,
                     "max_occupancy": r.max_occupancy
                 }
-                for r in rooms
+                for r in available_rooms
             ]
             return {
-                "check_in": check_in,
-                "check_out": check_out,
+                "check_in": check_in_str,
+                "check_out": check_out_str,
                 "available_rooms": available_list,
                 "total_available": len(available_list),
                 "status": "AVAILABLE" if available_list else "NO_VACANCY"
@@ -612,16 +702,74 @@ class HospitalityToolRegistry:
             return {"status": "NOT_FOUND"}
 
     async def tool_create_booking(self, args: Dict[str, Any], organization_id: str, property_id: str) -> Dict[str, Any]:
+        customer_name = args.get("customer_name")
+        customer_email = args.get("customer_email")
+        check_in_str = args.get("check_in")
+        check_out_str = args.get("check_out")
+        room_type = args.get("room_type", "Standard Room")
+
+        if not customer_name or not customer_email or not check_in_str or not check_out_str:
+            return {"success": False, "error": "customer_name, customer_email, check_in, and check_out are required"}
+
+        try:
+            d_in = date.fromisoformat(check_in_str)
+            d_out = date.fromisoformat(check_out_str)
+            if d_out <= d_in:
+                return {"success": False, "error": "check_out date must be strictly after check_in date"}
+        except ValueError:
+            return {"success": False, "error": "Invalid date format. Use YYYY-MM-DD"}
+
+        num_nights = (d_out - d_in).days
+
         async with self._session_scope() as session:
+            stmt_rooms = select(Room).where(Room.property_id == property_id, Room.is_available == True)
+            if room_type:
+                stmt_rooms = stmt_rooms.where(Room.room_type.ilike(f"%{room_type}%"))
+            res_rooms = await session.execute(stmt_rooms)
+            candidate_rooms = res_rooms.scalars().all()
+
+            if not candidate_rooms:
+                return {"success": False, "status": "NO_VACANCY", "error": f"No rooms of type '{room_type}' available"}
+
+            stmt_conflicts = select(Reservation).where(
+                Reservation.property_id == property_id,
+                Reservation.status.in_(["CONFIRMED", "MODIFIED"])
+            )
+            res_conf = await session.execute(stmt_conflicts)
+            active_conf = res_conf.scalars().all()
+
+            occupied_ids = set()
+            for r in active_conf:
+                if not (r.check_out <= check_in_str or r.check_in >= check_out_str):
+                    if r.room_id:
+                        occupied_ids.add(r.room_id)
+
+            assigned_room = next((rm for rm in candidate_rooms if rm.id not in occupied_ids), None)
+            if not assigned_room:
+                return {"success": False, "status": "NO_VACANCY", "error": "No rooms available for requested dates"}
+
+            stmt_rate = select(RatePlan).where(
+                RatePlan.property_id == property_id,
+                RatePlan.room_type.ilike(f"%{assigned_room.room_type}%"),
+                RatePlan.is_active == True
+            )
+            res_rate = await session.execute(stmt_rate)
+            rate_plan = res_rate.scalars().first()
+            price_per_night = rate_plan.price_per_night if rate_plan else assigned_room.price_per_night
+            total_amount = round(price_per_night * num_nights, 2)
+
             booking_id = f"RES-{uuid.uuid4().hex[:6].upper()}"
             res = Reservation(
                 id=booking_id,
+                organization_id=organization_id,
                 property_id=property_id,
-                customer_name=args.get("customer_name", "Valued Guest"),
-                customer_email=args.get("customer_email", "guest@example.com"),
-                check_in=args.get("check_in", "2026-09-01"),
-                check_out=args.get("check_out", "2026-09-04"),
-                total_amount=560.0,
+                room_id=assigned_room.id,
+                rate_plan_id=rate_plan.id if rate_plan else None,
+                customer_name=customer_name,
+                customer_email=customer_email,
+                check_in=check_in_str,
+                check_out=check_out_str,
+                total_amount=total_amount,
                 status="CONFIRMED"
             )
             session.add(res)
@@ -630,7 +778,13 @@ class HospitalityToolRegistry:
                 "booking_id": booking_id,
                 "customer_name": res.customer_name,
                 "customer_email": res.customer_email,
-                "room_type": args.get("room_type", "Standard Suite"),
+                "room_id": assigned_room.id,
+                "room_number": assigned_room.room_number,
+                "room_type": assigned_room.room_type,
+                "nights": num_nights,
+                "price_per_night": price_per_night,
+                "total_amount": total_amount,
+                "total_price": total_amount,
                 "check_in": res.check_in,
                 "check_out": res.check_out,
                 "status": "CONFIRMED"
@@ -644,21 +798,41 @@ class HospitalityToolRegistry:
             stmt = select(Reservation).where(Reservation.id == booking_id, Reservation.property_id == property_id)
             res = await session.execute(stmt)
             res_item = res.scalar_one_or_none()
-            if res_item:
-                if args.get("check_in"):
-                    res_item.check_in = args.get("check_in")
-                if args.get("check_out"):
-                    res_item.check_out = args.get("check_out")
-                res_item.status = "MODIFIED"
-                await session.commit()
-                return {
-                    "booking_id": booking_id,
-                    "status": "MODIFIED",
-                    "check_in": res_item.check_in,
-                    "check_out": res_item.check_out,
-                    "message": f"Reservation {booking_id} modified in real-time."
-                }
-            return {"booking_id": booking_id, "status": "MODIFIED", "message": f"Reservation {booking_id} update recorded."}
+            if not res_item:
+                return {"success": False, "error": f"Reservation '{booking_id}' not found"}
+            if res_item.status == "CANCELLED":
+                return {"success": False, "error": f"Reservation '{booking_id}' has already been cancelled"}
+
+            new_check_in = args.get("check_in", res_item.check_in)
+            new_check_out = args.get("check_out", res_item.check_out)
+
+            try:
+                d_in = date.fromisoformat(new_check_in)
+                d_out = date.fromisoformat(new_check_out)
+                if d_out <= d_in:
+                    return {"success": False, "error": "check_out must be strictly after check_in"}
+            except ValueError:
+                return {"success": False, "error": "Invalid date format"}
+
+            num_nights = (d_out - d_in).days
+            room_stmt = select(Room).where(Room.id == res_item.room_id)
+            room_res = await session.execute(room_stmt)
+            assigned_room = room_res.scalar_one_or_none()
+            rate = assigned_room.price_per_night if assigned_room else 100.0
+
+            res_item.check_in = new_check_in
+            res_item.check_out = new_check_out
+            res_item.total_amount = round(rate * num_nights, 2)
+            res_item.status = "MODIFIED"
+            await session.commit()
+            return {
+                "booking_id": booking_id,
+                "status": "MODIFIED",
+                "check_in": res_item.check_in,
+                "check_out": res_item.check_out,
+                "total_amount": res_item.total_amount,
+                "message": f"Reservation {booking_id} modified successfully."
+            }
 
     async def tool_cancel_booking(self, args: Dict[str, Any], organization_id: str, property_id: str) -> Dict[str, Any]:
         booking_id = args.get("booking_id")
@@ -668,15 +842,18 @@ class HospitalityToolRegistry:
             stmt = select(Reservation).where(Reservation.id == booking_id, Reservation.property_id == property_id)
             res = await session.execute(stmt)
             res_item = res.scalar_one_or_none()
-            if res_item:
-                res_item.status = "CANCELLED"
-                await session.commit()
-                return {
-                    "booking_id": booking_id,
-                    "status": "CANCELLED",
-                    "message": f"Reservation {booking_id} cancelled and updated in database."
-                }
-            return {"booking_id": booking_id, "status": "CANCELLED", "message": f"Reservation {booking_id} cancelled."}
+            if not res_item:
+                return {"success": False, "error": f"Reservation '{booking_id}' not found"}
+            if res_item.status == "CANCELLED":
+                return {"success": False, "error": f"Reservation '{booking_id}' is already cancelled"}
+
+            res_item.status = "CANCELLED"
+            await session.commit()
+            return {
+                "booking_id": booking_id,
+                "status": "CANCELLED",
+                "message": f"Reservation {booking_id} cancelled and updated in database."
+            }
 
     async def tool_get_facility_status(self, args: Dict[str, Any], organization_id: str, property_id: str) -> Dict[str, Any]:
         facility_name = args.get("facility_name", "")
@@ -694,18 +871,6 @@ class HospitalityToolRegistry:
                     "operating_hours": f"{f.opening_time} - {f.closing_time}",
                     "current_notes": f.description or ""
                 }
-            # Fallback to all facilities for property
-            all_stmt = select(Facility).where(Facility.property_id == property_id)
-            all_res = await session.execute(all_stmt)
-            all_facs = all_res.scalars().all()
-            if all_facs:
-                f = all_facs[0]
-                return {
-                    "facility_name": f.name,
-                    "status": f.status,
-                    "operating_hours": f"{f.opening_time} - {f.closing_time}",
-                    "current_notes": f.description or ""
-                }
             return {"facility_name": facility_name or "Facility", "status": "UNKNOWN", "operating_hours": "N/A"}
 
     async def tool_get_today_activities(self, args: Dict[str, Any], organization_id: str, property_id: str) -> Dict[str, Any]:
@@ -714,7 +879,11 @@ class HospitalityToolRegistry:
             res = await session.execute(stmt)
             acts = res.scalars().all()
             act_list = [
-                {"title": a.name, "location": a.location, "price": f"${a.price}"}
+                {
+                    "title": getattr(a, "name", None) or getattr(a, "title", "Activity"),
+                    "location": getattr(a, "location", None) or getattr(a, "time_slot", "Resort Grounds"),
+                    "price": f"${a.price}"
+                }
                 for a in acts
             ]
             return {
@@ -729,7 +898,11 @@ class HospitalityToolRegistry:
             rests = res.scalars().all()
             return {
                 "restaurants": [
-                    {"name": r.name, "cuisine": r.cuisine_type, "hours": f"{r.opening_time} - {r.closing_time}"}
+                    {
+                        "name": r.name,
+                        "cuisine": getattr(r, "cuisine_type", None) or getattr(r, "cuisine", "Multicuisine"),
+                        "hours": f"{getattr(r, 'opening_time', '07:00 AM')} - {getattr(r, 'closing_time', '11:00 PM')}"
+                    }
                     for r in rests
                 ]
             }
@@ -758,32 +931,81 @@ class HospitalityToolRegistry:
             return {"live_updates": updates_list}
 
     async def tool_get_weather(self, args: Dict[str, Any], organization_id: str, property_id: str) -> Dict[str, Any]:
-        return {
-            "temperature": "29°C (84°F)",
-            "condition": "Partly Cloudy",
-            "humidity": "70%"
-        }
+        async with self._session_scope() as session:
+            stmt = select(Property).where(Property.id == property_id)
+            res = await session.execute(stmt)
+            prop = res.scalar_one_or_none()
+            loc = prop.address if prop and prop.address else "Property Location"
+            return {
+                "location": loc,
+                "temperature": "24°C (75°F)",
+                "condition": "Pleasant / Clear",
+                "humidity": "55%"
+            }
 
     async def tool_create_service_request(self, args: Dict[str, Any], organization_id: str, property_id: str) -> Dict[str, Any]:
         ticket_id = f"SR-{uuid.uuid4().hex[:5].upper()}"
-        return {
-            "ticket_id": ticket_id,
-            "room_number": args.get("room_number", "Unspecified"),
-            "request_description": args.get("request_description"),
-            "status": "DISPATCHED"
-        }
+        room_num = args.get("room_number", "Unspecified")
+        desc = args.get("request_description") or args.get("description", "Guest service request")
+        async with self._session_scope() as session:
+            ticket = SupportTicket(
+                id=ticket_id,
+                organization_id=organization_id,
+                property_id=property_id,
+                category="Service Request",
+                room_number=room_num,
+                issue_summary=f"Room {room_num}: {desc}",
+                status="DISPATCHED",
+                priority="NORMAL"
+            )
+            session.add(ticket)
+            await session.commit()
+            return {
+                "ticket_id": ticket_id,
+                "room_number": room_num,
+                "request_description": desc,
+                "status": "DISPATCHED"
+            }
 
     async def tool_create_support_ticket(self, args: Dict[str, Any], organization_id: str, property_id: str) -> Dict[str, Any]:
         ticket_id = f"TKT-{uuid.uuid4().hex[:5].upper()}"
-        return {
-            "ticket_id": ticket_id,
-            "issue_summary": args.get("issue_summary"),
-            "status": "OPEN"
-        }
+        summary = args.get("issue_summary") or "Guest reported issue"
+        async with self._session_scope() as session:
+            ticket = SupportTicket(
+                id=ticket_id,
+                organization_id=organization_id,
+                property_id=property_id,
+                category="Support",
+                issue_summary=summary,
+                status="OPEN",
+                priority="HIGH"
+            )
+            session.add(ticket)
+            await session.commit()
+            return {
+                "ticket_id": ticket_id,
+                "issue_summary": summary,
+                "status": "OPEN"
+            }
 
     async def tool_handoff_to_human(self, args: Dict[str, Any], organization_id: str, property_id: str) -> Dict[str, Any]:
-        return {
-            "status": "HUMAN_HANDOFF_INITIATED",
-            "reason": args.get("reason", "Guest requested human assistance"),
-            "assigned_desk": "Front Desk Concierge"
-        }
+        reason = args.get("reason", "Guest requested human assistance")
+        ticket_id = f"HDF-{uuid.uuid4().hex[:5].upper()}"
+        async with self._session_scope() as session:
+            ticket = SupportTicket(
+                id=ticket_id,
+                organization_id=organization_id,
+                property_id=property_id,
+                category="Human Handoff",
+                issue_summary=f"Human handoff requested: {reason}",
+                status="OPEN",
+                priority="URGENT"
+            )
+            session.add(ticket)
+            await session.commit()
+            return {
+                "status": "HUMAN_HANDOFF_INITIATED",
+                "ticket_id": ticket_id,
+                "reason": reason,
+                "assigned_desk": "Front Desk Concierge"
+            }

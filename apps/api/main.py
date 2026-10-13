@@ -122,7 +122,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 # --- INCLUDE ROUTERS ---
 from apps.api.routers import (
-    health, auth, agents, voice, billing, integrations, platform, conversations, organizations
+    health, auth, agents, voice, billing, integrations, platform, conversations, organizations, hospitality_crud
 )
 
 app.include_router(health.router)
@@ -134,4 +134,5 @@ app.include_router(billing.router)
 app.include_router(integrations.router)
 app.include_router(platform.router)
 app.include_router(conversations.router)
+app.include_router(hospitality_crud.router)
 

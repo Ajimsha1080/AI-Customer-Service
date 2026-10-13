@@ -116,9 +116,10 @@ class RAGPipeline:
         chunks = self.chunk_text(content)
         documents_to_add = []
 
+        import uuid
         for idx, chunk in enumerate(chunks):
             documents_to_add.append({
-                "id": f"doc_{title.replace(' ', '_')}_{idx}",
+                "id": str(uuid.uuid4()),
                 "content": chunk,
                 "metadata": {
                     "title": title,

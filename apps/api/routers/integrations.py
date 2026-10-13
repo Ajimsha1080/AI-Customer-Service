@@ -3,10 +3,33 @@ import uuid
 import json
 from datetime import datetime, timezone
 from typing import Optional, List, Dict
-from fastapi import APIRouter, Depends, HTTPException, status, Request, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Request, Query, UploadFile, File, Form
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+import io
+
+def extract_text_from_file_bytes(filename: str, content_bytes: bytes) -> str:
+    ext = filename.lower().split(".")[-1] if "." in filename else "txt"
+    if ext in ["txt", "md", "csv", "json"]:
+        return content_bytes.decode("utf-8", errors="ignore")
+    elif ext == "pdf":
+        try:
+            import pypdf
+            reader = pypdf.PdfReader(io.BytesIO(content_bytes))
+            pages = [page.extract_text() or "" for page in reader.pages]
+            return "\n".join(pages).strip() or content_bytes.decode("utf-8", errors="ignore")
+        except Exception:
+            return content_bytes.decode("utf-8", errors="ignore")
+    elif ext in ["doc", "docx"]:
+        try:
+            import docx
+            doc = docx.Document(io.BytesIO(content_bytes))
+            paras = [p.text for p in doc.paragraphs if p.text]
+            return "\n".join(paras).strip() or content_bytes.decode("utf-8", errors="ignore")
+        except Exception:
+            return content_bytes.decode("utf-8", errors="ignore")
+    return content_bytes.decode("utf-8", errors="ignore")
 
 from services.database.session import get_db
 from services.database.models import (
@@ -98,22 +121,90 @@ async def upload_knowledge_document(req: KnowledgeDocumentRequest, current_user:
         title=req.title,
         content=req.content,
         content_raw=req.content,
-        document_type=req.document_type
+        document_type=req.document_type,
+        status="PENDING"
     )
     db.add(doc)
     await db.flush()
 
-    rag_service.add_document(doc_id, req.title, req.content, {
-        "organization_id": org_id,
-        "property_id": req.property_id,
-        "agent_id": req.agent_id
-    })
-    return {"id": doc.id, "title": doc.title, "status": "INDEXED", "vector_store": "pgvector"}
+    try:
+        await rag_service.add_document_async(doc_id, req.title, req.content, {
+            "organization_id": org_id,
+            "property_id": req.property_id,
+            "agent_id": req.agent_id,
+            "document_type": req.document_type
+        })
+        doc.status = "INDEXED"
+    except Exception as e:
+        doc.status = "FAILED"
+        doc.error_message = str(e)
+
+    await db.commit()
+    return {"id": doc.id, "title": doc.title, "status": doc.status, "vector_store": "pgvector"}
+
+@router.post("/api/v1/knowledge/documents/upload", tags=["Knowledge Base & RAG"])
+@router.post("/api/v1/knowledge/upload", tags=["Knowledge Base & RAG"])
+async def upload_multipart_document(
+    organization_id: str = Form(...),
+    property_id: str = Form(...),
+    agent_id: Optional[str] = Form(None),
+    title: Optional[str] = Form(None),
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    org_id = verify_tenant_access(current_user, organization_id)
+    allowed, reason, details = await metering_service.check_billing_quota(org_id, resource="upload_document", db=db)
+    if not allowed:
+        raise HTTPException(status_code=status.HTTP_402_PAYMENT_REQUIRED, detail=f"Billing quota exceeded: {reason}")
+
+    file_bytes = await file.read()
+    if len(file_bytes) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="File exceeds maximum allowed size limit of 10MB.")
+
+    filename = file.filename or "uploaded_file.txt"
+    ext = filename.split(".")[-1].lower() if "." in filename else "txt"
+    allowed_types = {"txt", "pdf", "json", "md", "csv", "doc", "docx"}
+    if ext not in allowed_types:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unsupported file format '{ext}'. Allowed: {sorted(list(allowed_types))}")
+
+    content = extract_text_from_file_bytes(filename, file_bytes)
+    doc_title = title or filename
+    doc_id = str(uuid.uuid4())
+
+    doc = KnowledgeDocument(
+        id=doc_id,
+        organization_id=org_id,
+        property_id=property_id,
+        agent_id=agent_id,
+        title=doc_title,
+        content=content,
+        content_raw=content,
+        document_type=ext,
+        status="PENDING"
+    )
+    db.add(doc)
+    await db.flush()
+
+    try:
+        await db.commit()
+        await rag_service.add_document_async(doc_id, doc_title, content, {
+            "organization_id": org_id,
+            "property_id": property_id,
+            "agent_id": agent_id,
+            "document_type": ext
+        })
+        doc.status = "INDEXED"
+    except Exception as e:
+        doc.status = "FAILED"
+        doc.error_message = str(e)
+
+    await db.commit()
+    return {"id": doc.id, "title": doc.title, "status": doc.status, "document_type": ext, "bytes_processed": len(file_bytes)}
 
 @router.get("/api/v1/rag/documents", tags=["Knowledge Base & RAG"])
 @router.get("/api/v1/knowledge/documents", tags=["Knowledge Base & RAG"])
 async def list_knowledge_documents(organization_id: Optional[str] = None, property_id: Optional[str] = None, limit: int = 50, offset: int = 0, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-
     org_id = verify_tenant_access(current_user, organization_id)
     stmt = select(KnowledgeDocument).where(KnowledgeDocument.organization_id == org_id)
     if property_id:
@@ -121,7 +212,7 @@ async def list_knowledge_documents(organization_id: Optional[str] = None, proper
     stmt = stmt.limit(limit).offset(offset)
     res = await db.execute(stmt)
     docs = res.scalars().all()
-    return [{"id": d.id, "title": d.title, "type": d.document_type, "created_at": str(d.created_at)} for d in docs]
+    return [{"id": d.id, "title": d.title, "type": d.document_type, "status": getattr(d, "status", "INDEXED"), "created_at": str(d.created_at)} for d in docs]
 
 class RAGQueryRequest(BaseModel):
     organization_id: str
@@ -132,7 +223,7 @@ class RAGQueryRequest(BaseModel):
 @router.post("/api/v1/rag/query", tags=["Knowledge Base & RAG"])
 async def query_knowledge_base(req: RAGQueryRequest, current_user: User = Depends(get_current_user)):
     org_id = verify_tenant_access(current_user, req.organization_id)
-    results = rag_service.search(req.query, top_k=req.top_k, organization_id=org_id, property_id=req.property_id)
+    results = await rag_service.similarity_search(req.query, top_k=req.top_k, organization_id=org_id, property_id=req.property_id)
     return {"query": req.query, "results": results}
 
 # --- LIVE ANNOUNCEMENTS & INTEGRATION SOURCES ---
@@ -394,6 +485,8 @@ async def get_integration_data_access(source_id: str, organization_id: Optional[
         DataAccessPolicy.organization_id == org_id,
         DataAccessPolicy.integration_source_id == source_id
     )
+    if property_id:
+        stmt = stmt.where(DataAccessPolicy.property_id == property_id)
     res = await db.execute(stmt)
     policies = res.scalars().all()
     policy_map = {p.category_key: p for p in policies}
@@ -402,9 +495,12 @@ async def get_integration_data_access(source_id: str, organization_id: Optional[
         {"category_key": "resident_room_info", "category_name": "Resident Room Information", "default_enabled": True, "default_scope": "own_data"},
         {"category_key": "food_menu_timings", "category_name": "Food Menu & Mess Timings", "default_enabled": True, "default_scope": "all_residents"},
         {"category_key": "facilities_availability", "category_name": "Facilities & Amenities Availability", "default_enabled": True, "default_scope": "all_residents"},
+        {"category_key": "maintenance_requests", "category_name": "Maintenance Requests", "default_enabled": True, "default_scope": "own_data"},
+        {"category_key": "notices", "category_name": "Property Notices & Announcements", "default_enabled": True, "default_scope": "all_residents"},
         {"category_key": "payment_info", "category_name": "Resident Payment & Fee Status", "default_enabled": False, "default_scope": "nobody"},
         {"category_key": "attendance_records", "category_name": "Resident Attendance Records", "default_enabled": False, "default_scope": "nobody"},
-        {"category_key": "staff_personal_info", "category_name": "Staff Personal Information", "default_enabled": False, "default_scope": "nobody"}
+        {"category_key": "staff_personal_info", "category_name": "Staff Personal Information", "default_enabled": False, "default_scope": "nobody"},
+        {"category_key": "reservations", "category_name": "Room Bookings & Reservations", "default_enabled": True, "default_scope": "all_residents"},
     ]
 
     result_categories = []
@@ -444,16 +540,18 @@ async def get_integration_data_access(source_id: str, organization_id: Optional[
 async def update_integration_data_access(source_id: str, req: DataAccessPolicyUpdateRequest, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     org_id = verify_tenant_access(current_user, req.organization_id)
     changes_list = []
-    actor = req.updated_by or current_user.full_name or "Hostel Admin"
+    actor = current_user.email or current_user.full_name or str(current_user.id)
     now_dt = datetime.now(timezone.utc)
 
     for cat in req.categories:
         stmt = select(DataAccessPolicy).where(
             DataAccessPolicy.organization_id == org_id,
+            DataAccessPolicy.property_id == req.property_id,
+            DataAccessPolicy.integration_source_id == source_id,
             DataAccessPolicy.category_key == cat.category_key
         )
         res = await db.execute(stmt)
-        pol = res.scalar_one_or_none()
+        pol = res.scalars().first()
         
         prev_enabled = pol.enabled if pol else False
         prev_scope = pol.user_scope if pol else "nobody"
@@ -497,7 +595,7 @@ async def update_integration_data_access(source_id: str, req: DataAccessPolicyUp
     audit = AuditLog(
         id=str(uuid.uuid4()),
         organization_id=org_id,
-        user_id=actor,
+        user_id=current_user.id,
         action="UPDATE_DATA_ACCESS_POLICY",
         target_type="ERP_INTEGRATION_ACCESS",
         target_id=source_id,
