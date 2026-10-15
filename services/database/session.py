@@ -32,8 +32,19 @@ if "postgresql" in write_db_url:
         "pool_timeout": settings.DB_POOL_TIMEOUT,
         "pool_recycle": settings.DB_POOL_RECYCLE,
     })
+elif "sqlite" in write_db_url:
+    engine_kwargs["connect_args"] = {"timeout": 60}
 
 engine = create_async_engine(write_db_url, **engine_kwargs)
+
+if "sqlite" in write_db_url:
+    from sqlalchemy import event
+    @event.listens_for(engine.sync_engine, "connect")
+    def set_sqlite_pragma(dbapi_connection, connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA busy_timeout=30000")
+        cursor.close()
 
 # Read Replica Engine Initialization (Enterprise Read/Write Isolation)
 read_db_url = _format_db_url(settings.READ_DATABASE_URL or settings.DATABASE_URL)

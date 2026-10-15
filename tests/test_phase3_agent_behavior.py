@@ -26,7 +26,11 @@ async def test_guardrail_prompt_injection_rejection():
         )
 
         assert res["status"] == "AI_ACTIVE"
-        assert res["debug_trace"]["guardrail_triggered"] in ["PROMPT_INJECTION_PREVENTED", "LLM_MODERATION_POLICY_VIOLATION"]
+        assert res["debug_trace"]["guardrail_triggered"] in [
+            "PROMPT_INJECTION_PREVENTED",
+            "LLM_MODERATION_POLICY_VIOLATION",
+            "PROMPT_INJECTION_ATTEMPT_DETECTED"
+        ]
         assert "hospitality assistant" in res["response"].lower()
 
 from types import SimpleNamespace

@@ -1,0 +1,49 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-network-policy
+  labels:
+    app: {{ .Release.Name }}
+spec:
+  podSelector:
+    matchLabels:
+      app: hospitality-agent-api
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow ingress traffic from Ingress controller or within namespace
+    - from:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8000
+    - from:
+        - podSelector:
+            matchLabels:
+              app: hospitality-agent-api
+      ports:
+        - protocol: TCP
+          port: 8000
+  egress:
+    # Allow egress to DNS
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Allow egress to PostgreSQL (5432) and Redis (6379)
+    - ports:
+        - protocol: TCP
+          port: 5432
+        - protocol: TCP
+          port: 6379
+    # Allow HTTPS egress for LLM providers (OpenAI, Sarvam, Anthropic) & Stripe
+    - ports:
+        - protocol: TCP
+          port: 443

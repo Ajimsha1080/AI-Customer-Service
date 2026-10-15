@@ -35,6 +35,12 @@ spec:
             limits:
               memory: "2Gi"
               cpu: "1000m"
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            failureThreshold: 30
+            periodSeconds: 10
           livenessProbe:
             httpGet:
               path: /health
@@ -47,6 +53,11 @@ spec:
               port: 8000
             initialDelaySeconds: 5
             periodSeconds: 5
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 10"]
+      terminationGracePeriodSeconds: 30
 ---
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler

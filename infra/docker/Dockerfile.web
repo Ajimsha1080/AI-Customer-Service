@@ -1,13 +1,13 @@
 # Multi-stage non-root production Dockerfile for Next.js Web Frontend
 # Stage 1: Install dependencies
-FROM node:18-alpine AS deps
+FROM node:20-alpine@sha256:cb31057864fbb1b9c97b5d12fcfe9b674b88d3f77341857900b991873919e9fa AS deps
 RUN apk add --no-cache libc6-compat
 WORKDIR /app
 COPY apps/web/package*.json ./
 RUN npm ci --prefer-offline --no-audit
 
 # Stage 2: Build Next.js application
-FROM node:18-alpine AS builder
+FROM node:20-alpine@sha256:cb31057864fbb1b9c97b5d12fcfe9b674b88d3f77341857900b991873919e9fa AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY apps/web ./
@@ -16,7 +16,7 @@ ENV NODE_ENV=production
 RUN npm run build
 
 # Stage 3: Minimal runner image
-FROM node:18-alpine AS runner
+FROM node:20-alpine@sha256:cb31057864fbb1b9c97b5d12fcfe9b674b88d3f77341857900b991873919e9fa AS runner
 WORKDIR /app
 
 ENV NODE_ENV=production
@@ -35,6 +35,8 @@ COPY --from=builder /app/package.json ./package.json
 USER nextjs
 
 EXPOSE 3000
+
+STOPSIGNAL SIGTERM
 
 HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
     CMD wget -qO- http://localhost:3000 || exit 1

@@ -16,6 +16,8 @@ ENV/
 
 # Local databases & logs
 *.db
+*.db-shm
+*.db-wal
 *.sqlite
 *.log
 .env
