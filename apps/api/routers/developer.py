@@ -13,8 +13,10 @@ from services.database.models import User, ApiKey, WebhookSubscription, WebhookD
 from services.integrations.webhooks import dispatch_customer_webhook
 from services.database.audit import record_audit_log_async
 from apps.api.auth import get_current_user, require_permission
+from services.resilience.tenant_limiter import enforce_tenant_fair_use_quota
+from services.database.pagination import paginate_query
 
-router = APIRouter(prefix="/api/v1/developer", tags=["Developer Platform: API Keys & Webhooks"])
+router = APIRouter(prefix="/api/v1/developer", tags=["Developer Platform: API Keys & Webhooks"], dependencies=[Depends(enforce_tenant_fair_use_quota)])
 
 class CreateApiKeyRequest(BaseModel):
     name: str

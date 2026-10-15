@@ -59,4 +59,52 @@ class HospitalityLocalizationService:
         lang = language_code.lower().split("-")[0]
         return lang in RTL_LANGUAGES
 
+    def get_ui_strings(self, locale: str = "en") -> Dict[str, Any]:
+        """Provides localized UI strings and layout direction for guest and staff portal."""
+        loc = (locale or "en").lower().split("-")[0]
+        ui_strings = {
+            "en": {
+                "welcome": "Welcome to your digital concierge",
+                "chat_placeholder": "Ask anything about our property, dining, or amenities...",
+                "send": "Send",
+                "human_takeover": "A front desk staff member is joining the conversation.",
+                "facilities": "Facilities & Amenities",
+                "dining": "Resort Dining",
+                "activities": "Activities & Events"
+            },
+            "es": {
+                "welcome": "Bienvenido a su conserje digital",
+                "chat_placeholder": "Pregunte cualquier cosa sobre nuestra propiedad, gastronomía o servicios...",
+                "send": "Enviar",
+                "human_takeover": "Un miembro del personal de recepción se unirá a la conversación.",
+                "facilities": "Instalaciones y Servicios",
+                "dining": "Restaurantes",
+                "activities": "Actividades y Eventos"
+            },
+            "ar": {
+                "welcome": "مرحبًا بك في الكونسيرج الرقمي",
+                "chat_placeholder": "اسأل عن أي شيء يخص المنتجع أو المطاعم أو المرافق...",
+                "send": "إرسال",
+                "human_takeover": "سينضم موظف مكتب الاستقبال إلى المحادثة قريبًا.",
+                "facilities": "المرافق والخدمات",
+                "dining": "المطاعم",
+                "activities": "الأنشطة والفعاليات"
+            },
+            "hi": {
+                "welcome": "आपके डिजिटल कंसीयज में आपका स्वागत है",
+                "chat_placeholder": "हमारी संपत्ति, भोजन या सुविधाओं के बारे में कुछ भी पूछें...",
+                "send": "भेजें",
+                "human_takeover": "फ्रंट डेस्क टीम का एक सदस्य आपसे शीघ्र ही जुड़ेगा।",
+                "facilities": "सुविधाएं और सेवाएं",
+                "dining": "भोजन और रेस्तरां",
+                "activities": "गतिविधियां और कार्यक्रम"
+            }
+        }
+        strings = ui_strings.get(loc, ui_strings["en"])
+        return {
+            "locale": loc,
+            "direction": "rtl" if self.is_rtl_language(loc) else "ltr",
+            "strings": strings
+        }
+
 localization_service = HospitalityLocalizationService()

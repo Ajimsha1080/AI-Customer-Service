@@ -140,23 +140,43 @@ async def async_rollup_usage_events(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 async def async_purge_retention_data(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Background task: purges audit logs and resolved conversations exceeding retention period."""
+    """Background task: purges expired conversations, messages, and voice sessions exceeding retention period."""
     days = payload.get("days", 90)
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-    logger.info(f"[TaskWorker] Purging operational logs older than {days} days (cutoff: {cutoff})")
+    org_id = payload.get("organization_id")
+    legal_hold = payload.get("legal_hold", False)
+    logger.info(f"[TaskWorker] Purging retention data older than {days} days for org={org_id} (legal_hold={legal_hold})")
 
     from services.database.session import AsyncSessionLocal
-    from services.database.models import AuditLog, UsageEvent
-    from sqlalchemy import delete
+    from services.compliance.retention_purger import retention_purger
 
-    purged_events = 0
     async with AsyncSessionLocal() as session:
-        stmt = delete(UsageEvent).where(UsageEvent.created_at < cutoff)
-        res = await session.execute(stmt)
-        purged_events = res.rowcount
-        await session.commit()
-
-    return {"status": "PURGED", "purged_events": purged_events, "retention_days": days}
+        if org_id:
+            purge_result = await retention_purger.execute_retention_purge(
+                db=session,
+                org_id=org_id,
+                retention_days=days,
+                legal_hold=legal_hold
+            )
+            await session.commit()
+            return purge_result
+        else:
+            from services.database.models import Organization
+            from sqlalchemy import select
+            res = await session.execute(select(Organization))
+            orgs = res.scalars().all()
+            total_convs = 0
+            total_msgs = 0
+            for org in orgs:
+                r = await retention_purger.execute_retention_purge(
+                    db=session,
+                    org_id=org.id,
+                    retention_days=days,
+                    legal_hold=legal_hold
+                )
+                total_convs += r.get("purged_conversations", 0)
+                total_msgs += r.get("purged_messages", 0)
+            await session.commit()
+            return {"status": "completed", "total_purged_conversations": total_convs, "total_purged_messages": total_msgs}
 
 
 TASK_REGISTRY = {

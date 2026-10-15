@@ -2,7 +2,7 @@ import uuid
 import json
 import asyncio
 from typing import Optional, List
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi import APIRouter, Depends, HTTPException, status, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -19,6 +19,8 @@ from services.agent_runtime.engine import AgentRuntimeEngine
 from services.billing.metering import SaaSMeteringService
 from services.security.limiter import limiter
 from services.realtime.broadcaster import realtime_hub
+from services.database.pagination import paginate_query
+from services.resilience.tenant_limiter import tenant_limiter
 
 router = APIRouter(prefix="/api/v1/agents", tags=["Control Plane - Agents"])
 agent_sdk = HospitalityAgentSDK()
@@ -170,14 +172,28 @@ async def update_agent(agent_id: str, req: UpdateAgentConfigRequest, current_use
     }
 
 @router.get("")
-async def list_agents(organization_id: Optional[str] = None, property_id: Optional[str] = None, limit: int = 50, offset: int = 0, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def list_agents(
+    response: Response,
+    organization_id: Optional[str] = None,
+    property_id: Optional[str] = None,
+    cursor: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
     org_id = verify_tenant_access(current_user, organization_id)
     stmt = select(Agent).where(Agent.organization_id == org_id)
     if property_id:
         stmt = stmt.where(Agent.property_id == property_id)
-    stmt = stmt.limit(limit).offset(offset)
-    res = await db.execute(stmt)
-    agents = res.scalars().all()
+    agents = await paginate_query(
+        db=db,
+        stmt=stmt,
+        model=Agent,
+        limit=limit,
+        cursor=cursor,
+        response=response
+    )
     return [
         { "id": a.id, "organization_id": a.organization_id, "property_id": a.property_id, "name": a.name, "agent_type": a.agent_type, "status": a.status or "ACTIVE", "description": a.description }
         for a in agents
@@ -254,6 +270,19 @@ async def agent_chat(request: Request, agent_id: str, req: AgentChatRequest, db:
         )
     effective_org_id = agent.organization_id
     await set_tenant_context(db, effective_org_id)
+
+    # Per-tenant fair-use token bucket rate limiter
+    rate_ok, rem_tokens, retry_sec = await tenant_limiter.consume(org_id=effective_org_id, cost=1)
+    if not rate_ok:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"FAIR_USE_QUOTA_EXCEEDED: Tenant '{effective_org_id}' rate limit reached. Please back off.",
+            headers={
+                "Retry-After": str(int(retry_sec)),
+                "X-RateLimit-Limit": str(tenant_limiter.default_burst_capacity),
+                "X-RateLimit-Remaining": "0"
+            }
+        )
 
     allowed, reason, details = await metering_service.check_billing_quota(effective_org_id, resource="agent_turn", db=db)
     if not allowed:
@@ -437,6 +466,19 @@ async def agent_chat_stream(request: Request, agent_id: str, req: AgentChatReque
         )
     effective_org_id = agent.organization_id
     await set_tenant_context(db, effective_org_id)
+
+    # Per-tenant fair-use token bucket rate limiter
+    rate_ok, rem_tokens, retry_sec = await tenant_limiter.consume(org_id=effective_org_id, cost=1)
+    if not rate_ok:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"FAIR_USE_QUOTA_EXCEEDED: Tenant '{effective_org_id}' rate limit reached. Please back off.",
+            headers={
+                "Retry-After": str(int(retry_sec)),
+                "X-RateLimit-Limit": str(tenant_limiter.default_burst_capacity),
+                "X-RateLimit-Remaining": "0"
+            }
+        )
 
     allowed, reason, _ = await metering_service.check_billing_quota(effective_org_id, resource="agent_turn", db=db)
     if not allowed:

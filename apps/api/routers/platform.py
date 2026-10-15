@@ -459,5 +459,8 @@ async def resolve_platform_incident(
     return inc
 
 
-
-
+@router.get("/localization/ui-strings", tags=["Localization"])
+async def get_localization_ui_strings(locale: str = Query("en")):
+    """Returns localized UI strings and RTL direction for guest and staff portal."""
+    from services.operations.localization import localization_service
+    return localization_service.get_ui_strings(locale)

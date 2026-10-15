@@ -21,6 +21,9 @@ class FeatureFlagManager:
             "kill_switch_integrations": {"enabled": False, "rollout_pct": 0, "enabled_orgs": set(), "disabled_orgs": set()},
 
             # Feature flags
+            "voice": {"enabled": True, "rollout_pct": 100, "enabled_orgs": set(), "disabled_orgs": set()},
+            "llm_tools": {"enabled": True, "rollout_pct": 100, "enabled_orgs": set(), "disabled_orgs": set()},
+            "integrations": {"enabled": True, "rollout_pct": 100, "enabled_orgs": set(), "disabled_orgs": set()},
             "ai_multilingual_v2": {"enabled": True, "rollout_pct": 100, "enabled_orgs": set(), "disabled_orgs": set()},
             "pms_realtime_sync": {"enabled": True, "rollout_pct": 50, "enabled_orgs": set(), "disabled_orgs": set()},
             "beta_voice_streaming": {"enabled": False, "rollout_pct": 0, "enabled_orgs": set(), "disabled_orgs": set()},

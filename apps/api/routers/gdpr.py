@@ -295,3 +295,30 @@ async def export_tenant_bundle(
         db=db
     )
     return bundle
+
+
+class RetentionPurgeRequest(BaseModel):
+    retention_days: Optional[int] = 90
+    legal_hold: bool = False
+
+@router.post("/retention/purge")
+async def execute_retention_purge_endpoint(
+    req: RetentionPurgeRequest,
+    organization_id: Optional[str] = None,
+    current_user: User = Depends(require_permission("org:write")),
+    db: AsyncSession = Depends(get_db)
+):
+    """Executes audited data retention purge honoring legal hold and recording cryptographic erasure proof."""
+    target_org = organization_id or current_user.organization_id
+    if current_user.organization_id != target_org and current_user.role != "SUPER_ADMIN":
+        raise HTTPException(status_code=403, detail="Forbidden: Cannot purge another organization's data.")
+
+    from services.compliance.retention_purger import retention_purger
+    res = await retention_purger.execute_retention_purge(
+        db=db,
+        org_id=target_org,
+        retention_days=req.retention_days,
+        legal_hold=req.legal_hold
+    )
+    await db.commit()
+    return res

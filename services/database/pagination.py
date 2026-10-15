@@ -46,3 +46,35 @@ def build_cursor_page_response(
         "has_more": has_more,
         "count": len(page_items)
     }
+
+
+async def paginate_query(
+    db,
+    stmt,
+    model,
+    limit: int = 50,
+    cursor: Optional[str] = None,
+    response: Optional[Any] = None,
+    order_by_desc: bool = True
+) -> List[Any]:
+    """Executes cursor-paginated query and sets X-Next-Cursor / X-Has-More response headers."""
+    if cursor and hasattr(model, "created_at"):
+        dt, item_id = decode_cursor(cursor)
+        if dt:
+            if order_by_desc:
+                stmt = stmt.where(model.created_at < dt)
+            else:
+                stmt = stmt.where(model.created_at > dt)
+    if hasattr(model, "created_at"):
+        if order_by_desc:
+            stmt = stmt.order_by(desc(model.created_at))
+        else:
+            stmt = stmt.order_by(asc(model.created_at))
+    stmt = stmt.limit(limit + 1)
+    res = await db.execute(stmt)
+    items = res.scalars().all()
+    page = build_cursor_page_response(items, limit)
+    if response and page.get("next_cursor"):
+        response.headers["X-Next-Cursor"] = page["next_cursor"]
+        response.headers["X-Has-More"] = str(page["has_more"]).lower()
+    return page["items"]

@@ -126,6 +126,15 @@ class TenantTokenBucketLimiter:
         if org_id in self._local_buckets:
             del self._local_buckets[org_id]
 
+    async def reset_org_async(self, org_id: str):
+        self.reset_org(org_id)
+        r = self._get_redis()
+        if r:
+            try:
+                await r.delete(f"hac:ratelimit:tb:{org_id}:tokens", f"hac:ratelimit:tb:{org_id}:last")
+            except Exception:
+                pass
+
 tenant_limiter = TenantTokenBucketLimiter()
 
 async def enforce_tenant_fair_use_quota(request: Request, cost: int = 1):
@@ -133,11 +142,13 @@ async def enforce_tenant_fair_use_quota(request: Request, cost: int = 1):
     FastAPI dependency that enforces per-tenant noisy-neighbor rate limits.
     Injects 429 Too Many Requests with Retry-After header when rate exceeded.
     """
-    import sys
-    if "pytest" in sys.modules:
-        return
-
-    org_id = getattr(request.state, "tenant_id", None) or request.headers.get("X-Tenant-ID", "global_anonymous")
+    org_id = (
+        getattr(request.state, "tenant_id", None)
+        or getattr(request.state, "organization_id", None)
+        or request.headers.get("X-Tenant-ID")
+        or request.headers.get("x-tenant-id")
+        or "global_anonymous"
+    )
     allowed, remaining, retry_after = await tenant_limiter.consume(org_id=org_id, cost=cost)
 
     if not allowed:

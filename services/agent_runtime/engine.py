@@ -9,6 +9,10 @@ load_dotenv()
 from typing import Dict, Any, List, Optional, AsyncGenerator
 from services.rag.pipeline import RAGPipeline
 from services.agent_runtime.tools import HospitalityToolRegistry
+from services.ai.guardrails import ai_guardrails
+from services.security.pii_masker import pii_engine
+from services.operations.feature_flags import feature_flags
+from services.ai.resilience_router import llm_router
 from apps.api.config import settings
 
 try:
@@ -25,46 +29,6 @@ class AgentRuntimeEngine:
         self.rag_pipeline = RAGPipeline()
         self.tool_registry = HospitalityToolRegistry(db_session=db_session, rag_pipeline=self.rag_pipeline)
 
-    async def execute_agent_turn(
-        self,
-        agent_config: Dict[str, Any],
-        user_message: str,
-        conversation_history: List[Dict[str, str]],
-        organization_id: str,
-        property_id: str,
-        agent_id: str,
-        channel: str = "web_widget",
-        language: str = "English",
-        user_context: Optional[Dict[str, Any]] = None,
-        **kwargs: Any
-    ) -> Dict[str, Any]:
-        """Executes a single multi-tenant agent turn supporting Sarvam AI Indic LLM & LiteLLM routing."""
-        user_context = user_context or {"user_role": "guest", "user_id": None, "resident_id": None}
-        start_time = time.time()
-        model_name = agent_config.get("model_name", "sarvam-2b")
-        system_prompt = agent_config.get("system_prompt", "You are a professional AI Concierge.")
-        enabled_tools = agent_config.get("enabled_tools", [])
-
-        tool_calls_executed = []
-        debug_trace = {
-            "model": model_name,
-            "provider_mode": "SARVAM_AI_INDIC_ENGINE",
-            "rag_context_retrieved": False,
-            "tools_called": [],
-            "guardrail_triggered": None
-        }
-
-        if "[Language:" in user_message:
-            try:
-                lang_part = user_message.split("[Language:")[1].split("]")[0].strip()
-                if lang_part:
-                    language = lang_part
-                user_message = user_message.split("]", 1)[1].strip()
-            except Exception:
-                pass
-
-        user_lower = user_message.lower()
-
     async def check_guardrails(
         self,
         user_message: str,
@@ -73,6 +37,15 @@ class AgentRuntimeEngine:
         **kwargs: Any
     ) -> Dict[str, Any]:
         """Real LLM classification / moderation guardrail check to detect prompt injection, jailbreaks, data exfiltration, or safety violations."""
+        # 1. AI Guardrails engine pre-check
+        is_safe, violation_reason = ai_guardrails.check_prompt_injection(user_message)
+        if not is_safe:
+            return {
+                "is_safe": False,
+                "reason": violation_reason or "PROMPT_INJECTION_PREVENTED",
+                "message": "I am a hospitality assistant designed to assist with property services, reservations, and guest amenities. How can I help you with your stay today?"
+            }
+
         user_lower = (user_message or "").lower()
 
         # Fast heuristic safety pre-checks
@@ -289,6 +262,26 @@ class AgentRuntimeEngine:
 
         user_lower = user_message.lower()
 
+        # Gate tools with feature flags & kill switch
+        if not feature_flags.is_enabled("llm_tools", org_id=organization_id):
+            enabled_tools = []
+
+        # Enforce spend caps via llm_router
+        if organization_id:
+            current_spend = llm_router.get_spend(organization_id)
+            spend_cap = llm_router._tenant_spend_caps.get(organization_id, float("inf"))
+            if current_spend >= spend_cap:
+                degraded = llm_router.get_degraded_response(user_message, reason="TENANT_SPEND_CAP_EXCEEDED")
+                return {
+                    "response": degraded["content"],
+                    "status": "AI_ACTIVE",
+                    "tool_calls": [],
+                    "debug_trace": {**debug_trace, "provider_mode": "DETERMINISTIC_DEGRADED_FALLBACK"},
+                    "latency_ms": int((time.time() - start_time) * 1000),
+                    "tokens_used": 0,
+                    "estimated_cost": 0.0
+                }
+
         # 1. REAL LLM & HEURISTIC GUARDRAIL PRE-CHECK
         guardrail_res = await self.check_guardrails(user_message, conversation_history, enabled_tools=enabled_tools)
         if not guardrail_res["is_safe"]:
@@ -303,8 +296,11 @@ class AgentRuntimeEngine:
                 "estimated_cost": 0.0001
             }
 
+        # Sanitize prompt before sending to LLM / RAG to prevent PII leakage
+        sanitized_user_message = pii_engine.sanitize_llm_prompt(user_message)
+
         # 2. RAG RETRIEVAL
-        rag_context = await self.rag_pipeline.retrieve_context(user_message, organization_id, property_id, agent_id)
+        rag_context = await self.rag_pipeline.retrieve_context(sanitized_user_message, organization_id, property_id, agent_id)
         debug_trace["rag_context_retrieved"] = True
 
         # 3. LITELLM REAL TOOL-CALLING LOOP (WITH HARD TIMEOUT)
@@ -516,6 +512,15 @@ class AgentRuntimeEngine:
         if not response_text:
             response_text = "Thank you for reaching out! Our digital concierge team is at your service."
 
+        # Check output content safety with ai_guardrails
+        is_safe_out, safety_reason = ai_guardrails.check_content_safety(response_text)
+        if not is_safe_out:
+            response_text = "I apologize, but I cannot assist with that request due to content safety policies."
+            debug_trace["guardrail_triggered"] = safety_reason
+
+        # Mask PII in response text to guarantee no credentials or card numbers cross to guests / logs
+        response_text = pii_engine.redact_pii(response_text, mode="mask")
+
         latency_ms = int((time.time() - start_time) * 1000)
         tokens_used = llm_tokens if (llm_tokens and llm_tokens > 0) else (len((user_message or "").split()) + len((response_text or "").split()) + 60)
         pricing_per_token = {
@@ -526,6 +531,9 @@ class AgentRuntimeEngine:
         }
         rate = pricing_per_token.get(model_name.lower(), 0.000001)
         estimated_cost = round(tokens_used * rate, 6)
+
+        if organization_id:
+            llm_router.record_spend(organization_id, estimated_cost)
 
         return {
             "response": response_text,

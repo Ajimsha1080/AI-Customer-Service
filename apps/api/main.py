@@ -124,9 +124,13 @@ async def custom_http_exception_handler(request: Request, exc: Exception):
     status_code = getattr(exc, "status_code", 400)
     detail = getattr(exc, "detail", str(exc))
     request_id = getattr(request.state, "request_id", f"req_{uuid.uuid4().hex[:12]}")
+    resp_headers = {"X-Request-ID": request_id}
+    exc_headers = getattr(exc, "headers", None)
+    if exc_headers and isinstance(exc_headers, dict):
+        resp_headers.update(exc_headers)
     return JSONResponse(
         status_code=status_code,
-        headers={"X-Request-ID": request_id},
+        headers=resp_headers,
         content={
             "detail": str(detail),
             "error": {

@@ -1,6 +1,6 @@
 import uuid
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Response, Query
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from services.database.session import get_db
 from services.database.models import User, Conversation, Message, ConversationStatus, UserRole
 from apps.api.auth import get_current_user, verify_tenant_access
+from services.database.pagination import paginate_query
 
 router = APIRouter(prefix="/api/v1/conversations", tags=["Staff Inbox & Conversations"])
 
@@ -19,8 +20,10 @@ class StaffReplyRequest(BaseModel):
 
 @router.get("")
 async def list_conversations(
+    response: Response,
     organization_id: Optional[str] = None,
     property_id: Optional[str] = None,
+    cursor: Optional[str] = None,
     limit: int = 50,
     offset: int = 0,
     current_user: User = Depends(get_current_user),
@@ -30,9 +33,15 @@ async def list_conversations(
     stmt = select(Conversation).where(Conversation.organization_id == org_id)
     if property_id:
         stmt = stmt.where(Conversation.property_id == property_id)
-    stmt = stmt.limit(limit).offset(offset)
-    res = await db.execute(stmt)
-    convs = res.scalars().all()
+
+    convs = await paginate_query(
+        db=db,
+        stmt=stmt,
+        model=Conversation,
+        limit=limit,
+        cursor=cursor,
+        response=response
+    )
     return [
         {
             "id": c.id,

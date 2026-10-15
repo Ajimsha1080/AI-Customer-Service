@@ -34,7 +34,7 @@ def extract_text_from_file_bytes(filename: str, content_bytes: bytes) -> str:
 from services.database.session import get_db
 from services.database.models import (
     User, KnowledgeDocument, LiveUpdate, IntegrationSource, DataAccessPolicy,
-    AuditLog, Agent, AgentStatus, AgentConfig
+    AuditLog, Agent, AgentStatus, AgentConfig, Organization
 )
 from apps.api.auth import get_current_user, verify_tenant_access
 from services.billing.metering import SaaSMeteringService
@@ -44,14 +44,22 @@ from services.security.network import validate_outbound_url_ssrf
 from services.security.encryption import encrypt_value, decrypt_value
 from services.agent_runtime.engine import AgentRuntimeEngine
 from services.integrations.whatsapp import WhatsAppCloudAPIClient
+from services.integrations.whatsapp_bsp import whatsapp_bsp, WhatsApp24HourWindowViolation
+from services.security.data_residency import data_residency_router
+from services.resilience.circuit_breaker import get_circuit_breaker, CircuitBreakerOpenError
+from services.operations.feature_flags import feature_flags
+from services.resilience.tenant_limiter import enforce_tenant_fair_use_quota
+from services.database.pagination import paginate_query
 from services.realtime.broadcaster import realtime_hub, generate_realtime_ticket, verify_realtime_ticket
 from apps.api.auth import decode_access_token
-from fastapi import WebSocket, WebSocketDisconnect
+from fastapi import WebSocket, WebSocketDisconnect, Response
 
 router = APIRouter(tags=["Knowledge Base & Integrations"])
 metering_service = SaaSMeteringService()
 rag_service = RAGVectorService()
 whatsapp_client = WhatsAppCloudAPIClient()
+erp_circuit_breaker = get_circuit_breaker("erp", failure_threshold=3, recovery_timeout=5.0, call_timeout=10.0)
+whatsapp_circuit_breaker = get_circuit_breaker("whatsapp", failure_threshold=3, recovery_timeout=5.0, call_timeout=10.0)
 
 class KnowledgeDocumentRequest(BaseModel):
     organization_id: str
@@ -60,6 +68,7 @@ class KnowledgeDocumentRequest(BaseModel):
     title: str
     content: str
     document_type: str = "txt"
+    target_region: Optional[str] = None
 
 class LiveUpdateRequest(BaseModel):
     organization_id: str
@@ -99,6 +108,14 @@ async def upload_knowledge_document(req: KnowledgeDocumentRequest, current_user:
     allowed, reason, details = await metering_service.check_billing_quota(org_id, resource="upload_document", db=db)
     if not allowed:
         raise HTTPException(status_code=status.HTTP_402_PAYMENT_REQUIRED, detail=f"Billing quota exceeded: {reason}")
+
+    # Data Residency Boundary Check
+    org_stmt = select(Organization).where(Organization.id == org_id)
+    org_res = await db.execute(org_stmt)
+    org_obj = org_res.scalar_one_or_none()
+    tenant_region = org_obj.data_residency_region if (org_obj and org_obj.data_residency_region) else "US"
+    target_reg = req.target_region or tenant_region
+    data_residency_router.validate_regional_call(tenant_region, target_reg)
 
     # Upload Safety Validation
     allowed_types = {"txt", "pdf", "json", "md", "csv", "doc", "docx"}
@@ -149,6 +166,7 @@ async def upload_multipart_document(
     property_id: str = Form(...),
     agent_id: Optional[str] = Form(None),
     title: Optional[str] = Form(None),
+    target_region: Optional[str] = Form(None),
     file: UploadFile = File(...),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
@@ -157,6 +175,14 @@ async def upload_multipart_document(
     allowed, reason, details = await metering_service.check_billing_quota(org_id, resource="upload_document", db=db)
     if not allowed:
         raise HTTPException(status_code=status.HTTP_402_PAYMENT_REQUIRED, detail=f"Billing quota exceeded: {reason}")
+
+    # Data Residency Boundary Check
+    org_stmt = select(Organization).where(Organization.id == org_id)
+    org_res = await db.execute(org_stmt)
+    org_obj = org_res.scalar_one_or_none()
+    tenant_region = org_obj.data_residency_region if (org_obj and org_obj.data_residency_region) else "US"
+    target_reg = target_region or tenant_region
+    data_residency_router.validate_regional_call(tenant_region, target_reg)
 
     file_bytes = await file.read()
     if len(file_bytes) > 10 * 1024 * 1024:
@@ -375,19 +401,39 @@ async def create_user_realtime_ticket(current_user: User = Depends(get_current_u
     return {"ticket": ticket, "expires_in": 60}
 
 @router.get("/api/v1/live-updates", tags=["Live Property Announcements"])
-async def list_live_updates(organization_id: Optional[str] = None, property_id: Optional[str] = None, limit: int = 50, offset: int = 0, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def list_live_updates(
+    response: Response,
+    organization_id: Optional[str] = None,
+    property_id: Optional[str] = None,
+    cursor: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
     org_id = verify_tenant_access(current_user, organization_id)
     stmt = select(LiveUpdate).where(LiveUpdate.organization_id == org_id)
     if property_id:
         stmt = stmt.where(LiveUpdate.property_id == property_id)
-    stmt = stmt.limit(limit).offset(offset)
-    res = await db.execute(stmt)
-    upds = res.scalars().all()
+    upds = await paginate_query(
+        db=db,
+        stmt=stmt,
+        model=LiveUpdate,
+        limit=limit,
+        cursor=cursor,
+        response=response
+    )
     return [{"id": u.id, "title": u.title, "content": u.content, "priority": u.priority} for u in upds]
 
 @router.post("/api/v1/live-updates/integrations", tags=["Live Property Announcements"])
 async def connect_integration_source(req: IntegrationSourceRequest, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     org_id = verify_tenant_access(current_user, req.organization_id)
+    if feature_flags.is_kill_switch_active("kill_switch_integrations") or not feature_flags.is_enabled("integrations", org_id=org_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="FEATURE_DISABLED: Integrations subsystem is disabled or kill switch engaged."
+        )
+
     # SSRF Protection: forbid loopback, private IPs, and cloud metadata (169.254.169.254)
     validate_outbound_url_ssrf(req.source_url)
 
@@ -414,19 +460,35 @@ async def connect_integration_source(req: IntegrationSourceRequest, current_user
     return {"id": src.id, "name": src.name, "status": "PENDING", "credentials_masked": masked}
 
 @router.get("/api/v1/live-updates/integrations", tags=["Live Property Announcements"])
-async def list_integration_sources(organization_id: Optional[str] = None, property_id: Optional[str] = None, limit: int = 50, offset: int = 0, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def list_integration_sources(
+    response: Response,
+    organization_id: Optional[str] = None,
+    property_id: Optional[str] = None,
+    cursor: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
     org_id = verify_tenant_access(current_user, organization_id)
     stmt = select(IntegrationSource).where(IntegrationSource.organization_id == org_id)
     if property_id:
         stmt = stmt.where(IntegrationSource.property_id == property_id)
-    stmt = stmt.limit(limit).offset(offset)
-    res = await db.execute(stmt)
-    srcs = res.scalars().all()
+    srcs = await paginate_query(
+        db=db,
+        stmt=stmt,
+        model=IntegrationSource,
+        limit=limit,
+        cursor=cursor,
+        response=response
+    )
     return [
         {
             "id": s.id,
             "name": s.name,
             "type": s.source_type,
+            "source_type": s.source_type,
+            "source_url": s.source_url,
             "status": s.status or s.sync_status,
             "credentials_masked": s.credentials_masked
         }
@@ -513,6 +575,12 @@ async def trigger_integration_sync(
     Updates status, last_synced_at, and error capture with retry mechanism.
     """
     org_id = verify_tenant_access(current_user, organization_id)
+    if feature_flags.is_kill_switch_active("kill_switch_integrations") or not feature_flags.is_enabled("integrations", org_id=org_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="FEATURE_DISABLED: Integrations subsystem is disabled or kill switch engaged."
+        )
+
     stmt = select(IntegrationSource).where(IntegrationSource.id == source_id, IntegrationSource.organization_id == org_id)
     res = await db.execute(stmt)
     src = res.scalar_one_or_none()
@@ -539,13 +607,20 @@ async def trigger_integration_sync(
             import httpx
             for attempt in range(3):
                 try:
-                    async with httpx.AsyncClient(timeout=10.0) as client:
-                        resp = await client.get(src.source_url, headers=headers)
-                        if resp.status_code < 400:
-                            sync_success = True
-                            break
-                        else:
-                            error_msg = f"HTTP {resp.status_code}"
+                    async def _do_sync():
+                        async with httpx.AsyncClient(timeout=10.0) as client:
+                            resp = await client.get(src.source_url, headers=headers)
+                            if resp.status_code < 400:
+                                return True
+                            raise HTTPException(status_code=502, detail=f"HTTP {resp.status_code}")
+
+                    sync_success = await erp_circuit_breaker.call(_do_sync)
+                    if sync_success:
+                        break
+                except CircuitBreakerOpenError as cbe:
+                    error_msg = f"CIRCUIT_BREAKER_OPEN: {str(cbe)}"
+                    sync_success = False
+                    break
                 except Exception as e:
                     error_msg = str(e)
                     if attempt < 2:
@@ -753,18 +828,26 @@ async def verify_whatsapp_webhook(
     hub_verify_token: Optional[str] = Query(None, alias="hub.verify_token")
 ):
     """Meta WhatsApp Webhook Verification Challenge handler."""
-    if not whatsapp_client.verify_token:
-        raise HTTPException(status_code=503, detail="WhatsApp verify token is not configured.")
-    if hub_mode == "subscribe" and hub_verify_token == whatsapp_client.verify_token:
+    verified = whatsapp_bsp.verify_webhook_challenge(hub_mode or "", hub_verify_token or "", hub_challenge or "")
+    if verified is not None:
+        return int(verified) if str(verified).isdigit() else verified
+    if hub_mode == "subscribe" and whatsapp_client.verify_token and hub_verify_token == whatsapp_client.verify_token:
         return int(hub_challenge) if hub_challenge and hub_challenge.isdigit() else hub_challenge
     raise HTTPException(status_code=403, detail="WhatsApp Webhook verification failed. Invalid verify_token.")
 
-@router.post("/api/v1/integrations/whatsapp/webhook", tags=["WhatsApp Integration"])
+@router.post("/api/v1/integrations/whatsapp/webhook", tags=["WhatsApp Integration"], dependencies=[Depends(enforce_tenant_fair_use_quota)])
 async def process_whatsapp_inbound_webhook(request: Request, db: AsyncSession = Depends(get_db)):
     """Processes inbound WhatsApp messages and status updates from Meta."""
+    if feature_flags.is_kill_switch_active("kill_switch_integrations"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="FEATURE_DISABLED: Integrations subsystem is disabled or kill switch engaged."
+        )
+
     payload_bytes = await request.body()
     signature = request.headers.get("x-hub-signature-256") or ""
-    if not whatsapp_client.verify_webhook_signature(payload_bytes, signature):
+    is_valid_sig = whatsapp_bsp.verify_inbound_signature(payload_bytes, signature) or whatsapp_client.verify_webhook_signature(payload_bytes, signature)
+    if not is_valid_sig:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid WhatsApp webhook signature.")
 
     try:
@@ -811,7 +894,22 @@ async def process_whatsapp_inbound_webhook(request: Request, db: AsyncSession = 
                             user_context={"user_role": "guest", "user_id": sender_phone}
                         )
                         reply = turn.get("response", "Thank you for contacting us.")
-                        await whatsapp_client.send_text_message(sender_phone, reply)
+
+                        # Prepare message via whatsapp_bsp enforcing 24-hr window
+                        prepared_msg = whatsapp_bsp.prepare_outbound_message(
+                            recipient_phone=sender_phone,
+                            last_inbound_time=datetime.now(timezone.utc),
+                            freeform_text=reply
+                        )
+
+                        # Send via circuit-breaker protected call
+                        async def _send_reply():
+                            return await whatsapp_client.send_text_message(sender_phone, reply)
+
+                        try:
+                            await whatsapp_circuit_breaker.call(_send_reply)
+                        except CircuitBreakerOpenError as cbe:
+                            logger.error(f"WhatsApp circuit breaker open: {cbe}")
                     processed_count += 1
 
     return {"status": "SUCCESS", "events_processed": processed_count}

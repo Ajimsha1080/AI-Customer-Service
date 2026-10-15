@@ -1,4 +1,5 @@
 import logging
+import asyncio
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, Optional
 from urllib.parse import urlparse
@@ -10,9 +11,11 @@ from apps.api.config import settings
 from services.database.session import set_tenant_context
 from services.database.models import Subscription, Organization, ProcessedWebhookEvent
 from services.billing.metering import SaaSMeteringService
+from services.resilience.circuit_breaker import get_circuit_breaker, CircuitBreakerOpenError
 
 logger = logging.getLogger("hospitality_agent_cloud.stripe")
 metering_service = SaaSMeteringService()
+stripe_circuit_breaker = get_circuit_breaker("stripe", failure_threshold=3, recovery_timeout=5.0, call_timeout=10.0)
 
 PLAN_PRICE_MAP = {
     "STARTER": settings.STRIPE_PRICE_STARTER,
@@ -106,7 +109,10 @@ class StripeBillingService:
             if customer_id:
                 session_params["customer"] = customer_id
 
-            session = stripe.checkout.Session.create(**session_params)
+            async def _do_create_session():
+                return stripe.checkout.Session.create(**session_params)
+
+            session = await stripe_circuit_breaker.call(_do_create_session)
             return {
                 "checkout_url": session.url,
                 "session_id": session.id,
@@ -114,6 +120,12 @@ class StripeBillingService:
                 "plan_name": normalized_plan,
                 "mode": "REAL_STRIPE"
             }
+        except CircuitBreakerOpenError as cbe:
+            logger.error(f"Stripe circuit breaker is OPEN: {cbe}")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"Stripe billing gateway temporarily unavailable: {str(cbe)}"
+            )
         except Exception as e:
             logger.error(f"Stripe Checkout creation failed: {e}")
             raise HTTPException(
@@ -143,11 +155,21 @@ class StripeBillingService:
         try:
             import stripe
             stripe.api_key = self.secret_key
-            portal_session = stripe.billing_portal.Session.create(
-                customer=sub.stripe_customer_id,
-                return_url=return_url
-            )
+
+            async def _do_create_portal():
+                return stripe.billing_portal.Session.create(
+                    customer=sub.stripe_customer_id,
+                    return_url=return_url
+                )
+
+            portal_session = await stripe_circuit_breaker.call(_do_create_portal)
             return {"portal_url": portal_session.url}
+        except CircuitBreakerOpenError as cbe:
+            logger.error(f"Stripe circuit breaker is OPEN: {cbe}")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"Stripe billing gateway temporarily unavailable: {str(cbe)}"
+            )
         except Exception as e:
             logger.error(f"Stripe Customer Portal creation failed: {e}")
             raise HTTPException(

@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone, date
 from typing import Optional, List, Dict, Any
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import select, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,6 +13,7 @@ from services.database.models import (
 )
 from apps.api.auth import get_current_user, verify_tenant_access, require_role
 from services.realtime.broadcaster import realtime_hub
+from services.database.pagination import paginate_query
 
 router = APIRouter(tags=["Hospitality Data Plane"])
 
@@ -180,8 +181,11 @@ async def _verify_property_ownership(property_id: str, org_id: str, db: AsyncSes
 
 @router.get("/api/v1/rooms")
 async def list_rooms(
+    response: Response,
     organization_id: Optional[str] = None,
     property_id: Optional[str] = None,
+    cursor: Optional[str] = None,
+    limit: int = 50,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
@@ -189,9 +193,7 @@ async def list_rooms(
     stmt = select(Room).where(Room.organization_id == org_id)
     if property_id:
         stmt = stmt.where(Room.property_id == property_id)
-    res = await db.execute(stmt)
-    rooms = res.scalars().all()
-    return rooms
+    return await paginate_query(db=db, stmt=stmt, model=Room, limit=limit, cursor=cursor, response=response)
 
 @router.post("/api/v1/rooms", status_code=status.HTTP_201_CREATED)
 async def create_room(
@@ -270,8 +272,11 @@ async def delete_room(
 
 @router.get("/api/v1/facilities")
 async def list_facilities(
+    response: Response,
     organization_id: Optional[str] = None,
     property_id: Optional[str] = None,
+    cursor: Optional[str] = None,
+    limit: int = 50,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
@@ -279,8 +284,7 @@ async def list_facilities(
     stmt = select(Facility).where(Facility.organization_id == org_id)
     if property_id:
         stmt = stmt.where(Facility.property_id == property_id)
-    res = await db.execute(stmt)
-    return res.scalars().all()
+    return await paginate_query(db=db, stmt=stmt, model=Facility, limit=limit, cursor=cursor, response=response)
 
 @router.post("/api/v1/facilities", status_code=status.HTTP_201_CREATED)
 async def create_facility(
@@ -344,13 +348,20 @@ async def delete_facility(facility_id: str, current_user: User = Depends(require
 # ----------------- RESTAURANTS CRUD -----------------
 
 @router.get("/api/v1/restaurants")
-async def list_restaurants(organization_id: Optional[str] = None, property_id: Optional[str] = None, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def list_restaurants(
+    response: Response,
+    organization_id: Optional[str] = None,
+    property_id: Optional[str] = None,
+    cursor: Optional[str] = None,
+    limit: int = 50,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
     org_id = verify_tenant_access(current_user, organization_id)
     stmt = select(Restaurant).where(Restaurant.organization_id == org_id)
     if property_id:
         stmt = stmt.where(Restaurant.property_id == property_id)
-    res = await db.execute(stmt)
-    return res.scalars().all()
+    return await paginate_query(db=db, stmt=stmt, model=Restaurant, limit=limit, cursor=cursor, response=response)
 
 @router.post("/api/v1/restaurants", status_code=status.HTTP_201_CREATED)
 async def create_restaurant(data: RestaurantCreate, current_user: User = Depends(require_role(UserRole.STAFF)), db: AsyncSession = Depends(get_db)):
@@ -425,13 +436,20 @@ async def delete_restaurant(restaurant_id: str, current_user: User = Depends(req
 # ----------------- ACTIVITIES CRUD -----------------
 
 @router.get("/api/v1/activities")
-async def list_activities(organization_id: Optional[str] = None, property_id: Optional[str] = None, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def list_activities(
+    response: Response,
+    organization_id: Optional[str] = None,
+    property_id: Optional[str] = None,
+    cursor: Optional[str] = None,
+    limit: int = 50,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
     org_id = verify_tenant_access(current_user, organization_id)
     stmt = select(Activity).where(Activity.organization_id == org_id)
     if property_id:
         stmt = stmt.where(Activity.property_id == property_id)
-    res = await db.execute(stmt)
-    return res.scalars().all()
+    return await paginate_query(db=db, stmt=stmt, model=Activity, limit=limit, cursor=cursor, response=response)
 
 @router.post("/api/v1/activities", status_code=status.HTTP_201_CREATED)
 async def create_activity(data: ActivityCreate, current_user: User = Depends(require_role(UserRole.STAFF)), db: AsyncSession = Depends(get_db)):
@@ -506,13 +524,20 @@ async def delete_activity(activity_id: str, current_user: User = Depends(require
 # ----------------- RATE PLANS CRUD -----------------
 
 @router.get("/api/v1/rate-plans")
-async def list_rate_plans(organization_id: Optional[str] = None, property_id: Optional[str] = None, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def list_rate_plans(
+    response: Response,
+    organization_id: Optional[str] = None,
+    property_id: Optional[str] = None,
+    cursor: Optional[str] = None,
+    limit: int = 50,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
     org_id = verify_tenant_access(current_user, organization_id)
     stmt = select(RatePlan).where(RatePlan.organization_id == org_id)
     if property_id:
         stmt = stmt.where(RatePlan.property_id == property_id)
-    res = await db.execute(stmt)
-    return res.scalars().all()
+    return await paginate_query(db=db, stmt=stmt, model=RatePlan, limit=limit, cursor=cursor, response=response)
 
 @router.post("/api/v1/rate-plans", status_code=status.HTTP_201_CREATED)
 async def create_rate_plan(data: RatePlanCreate, current_user: User = Depends(require_role(UserRole.ADMIN)), db: AsyncSession = Depends(get_db)):
@@ -572,13 +597,20 @@ async def delete_rate_plan(rate_plan_id: str, current_user: User = Depends(requi
 # ----------------- RESIDENTS CRUD -----------------
 
 @router.get("/api/v1/residents")
-async def list_residents(organization_id: Optional[str] = None, property_id: Optional[str] = None, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def list_residents(
+    response: Response,
+    organization_id: Optional[str] = None,
+    property_id: Optional[str] = None,
+    cursor: Optional[str] = None,
+    limit: int = 50,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
     org_id = verify_tenant_access(current_user, organization_id)
     stmt = select(Resident).where(Resident.organization_id == org_id)
     if property_id:
         stmt = stmt.where(Resident.property_id == property_id)
-    res = await db.execute(stmt)
-    return res.scalars().all()
+    return await paginate_query(db=db, stmt=stmt, model=Resident, limit=limit, cursor=cursor, response=response)
 
 @router.post("/api/v1/residents", status_code=status.HTTP_201_CREATED)
 async def create_resident(data: ResidentCreate, current_user: User = Depends(require_role(UserRole.STAFF)), db: AsyncSession = Depends(get_db)):
@@ -642,13 +674,20 @@ async def delete_resident(resident_id: str, current_user: User = Depends(require
 # ----------------- RESERVATIONS CRUD -----------------
 
 @router.get("/api/v1/reservations")
-async def list_reservations(organization_id: Optional[str] = None, property_id: Optional[str] = None, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def list_reservations(
+    response: Response,
+    organization_id: Optional[str] = None,
+    property_id: Optional[str] = None,
+    cursor: Optional[str] = None,
+    limit: int = 50,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
     org_id = verify_tenant_access(current_user, organization_id)
     stmt = select(Reservation).where(Reservation.organization_id == org_id)
     if property_id:
         stmt = stmt.where(Reservation.property_id == property_id)
-    res = await db.execute(stmt)
-    return res.scalars().all()
+    return await paginate_query(db=db, stmt=stmt, model=Reservation, limit=limit, cursor=cursor, response=response)
 
 @router.post("/api/v1/reservations", status_code=status.HTTP_201_CREATED)
 async def create_reservation(data: ReservationCreate, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
@@ -793,13 +832,20 @@ async def cancel_reservation(reservation_id: str, current_user: User = Depends(g
 # ----------------- SUPPORT TICKETS CRUD -----------------
 
 @router.get("/api/v1/support-tickets")
-async def list_support_tickets(organization_id: Optional[str] = None, property_id: Optional[str] = None, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def list_support_tickets(
+    response: Response,
+    organization_id: Optional[str] = None,
+    property_id: Optional[str] = None,
+    cursor: Optional[str] = None,
+    limit: int = 50,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
     org_id = verify_tenant_access(current_user, organization_id)
     stmt = select(SupportTicket).where(SupportTicket.organization_id == org_id)
     if property_id:
         stmt = stmt.where(SupportTicket.property_id == property_id)
-    res = await db.execute(stmt)
-    return res.scalars().all()
+    return await paginate_query(db=db, stmt=stmt, model=SupportTicket, limit=limit, cursor=cursor, response=response)
 
 @router.post("/api/v1/support-tickets", status_code=status.HTTP_201_CREATED)
 async def create_support_ticket(data: SupportTicketCreate, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
