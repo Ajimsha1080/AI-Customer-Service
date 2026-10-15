@@ -75,18 +75,7 @@ export default function AppLiveUpdatesPage() {
 
   // Connected Systems (ERP Integration) State
   const [isErpAiAccessEnabled, setIsErpAiAccessEnabled] = useState(false);
-  const [integrations, setIntegrations] = useState([
-    {
-      id: 'src_hostel_erp_01',
-      name: 'Hostel ERP',
-      source_type: 'REST_API',
-      source_url: 'https://api.campushostel.edu/v1/live-sync',
-      auth_type: 'API_KEY',
-      credentials_masked: '••••••••key_erp_8849',
-      status: 'CONNECTED',
-      last_synced_at: 'Just now'
-    }
-  ]);
+  const [integrations, setIntegrations] = useState<any[]>([]);
 
   // Data Access Control State
   const [isDataAccessModalOpen, setIsDataAccessModalOpen] = useState(false);
@@ -140,6 +129,23 @@ export default function AppLiveUpdatesPage() {
       }
     }
     initSSE();
+
+    async function loadIntegrations() {
+      try {
+        const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+        const res = await fetch(`${API_BASE}/api/v1/live-updates/integrations`, {
+          headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+        });
+        if (res.ok) {
+          const data = await res.json();
+          setIntegrations(Array.isArray(data) ? data : []);
+        }
+      } catch (err) {
+        console.warn('Failed to load integrations:', err);
+      }
+    }
+    loadIntegrations();
+
     return () => {
       if (es) es.close();
     };
@@ -621,7 +627,16 @@ export default function AppLiveUpdatesPage() {
           </div>
 
           <div className="grid grid-cols-1 gap-4">
-            {integrations.map(src => (
+            {integrations.length === 0 ? (
+              <div className="yc-card p-12 text-center space-y-3">
+                <Database className="w-10 h-10 text-zinc-400 mx-auto" />
+                <h3 className="text-sm font-bold text-zinc-900">No Connected Systems</h3>
+                <p className="text-xs text-zinc-500 max-w-sm mx-auto">
+                  No external ERP or PMS systems are currently connected. Connect a live information source to enable automatic syncing.
+                </p>
+              </div>
+            ) : (
+              integrations.map(src => (
               <div key={src.id} className="yc-card p-6 space-y-5">
                 <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
                   <div className="flex items-center gap-3">
@@ -693,7 +708,7 @@ export default function AppLiveUpdatesPage() {
                   </div>
                 </div>
               </div>
-            ))}
+            )))}
           </div>
         </div>
       )}

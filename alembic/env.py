@@ -30,6 +30,12 @@ if "sqlite" in sync_db_url and not sync_db_url.startswith("sqlite:///"):
     sync_db_url = "sqlite:///./dev_hospitality.db"
 config.set_main_option("sqlalchemy.url", sync_db_url)
 
+def compare_type(context, inspected_column, metadata_column, inspected_type, metadata_type):
+    if context.dialect.name == "sqlite":
+        if "VECTOR" in str(metadata_type).upper() or "VECTOR" in str(inspected_type).upper():
+            return False
+    return None
+
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode."""
     url = config.get_main_option("sqlalchemy.url")
@@ -38,7 +44,8 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
-        render_as_batch=True
+        render_as_batch=True,
+        compare_type=compare_type
     )
 
     with context.begin_transaction():
@@ -56,7 +63,8 @@ def run_migrations_online() -> None:
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
-            render_as_batch=True
+            render_as_batch=True,
+            compare_type=compare_type
         )
 
         with context.begin_transaction():

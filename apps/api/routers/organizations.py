@@ -312,6 +312,14 @@ async def create_property(
             detail="Creating properties requires minimum ADMIN role."
         )
 
+    # Check property entitlement quota
+    allowed, reason, _ = await SaaSMeteringService().check_billing_quota(org_id, resource="property_creation", db=db)
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail=f"Billing quota exceeded: {reason}"
+        )
+
     prop_id = str(uuid.uuid4())
     prop = Property(
         id=prop_id,

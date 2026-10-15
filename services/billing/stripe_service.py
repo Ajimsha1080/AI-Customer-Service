@@ -273,6 +273,12 @@ class StripeBillingService:
                     db_sub.dunning_attempt_count = 0
                     db_sub.dunning_last_failed_at = None
                     db_sub.dunning_grace_period_until = None
+                    period_start_ts = event_data.get("current_period_start")
+                    period_end_ts = event_data.get("current_period_end")
+                    if period_start_ts:
+                        db_sub.current_period_start = datetime.fromtimestamp(period_start_ts, tz=timezone.utc)
+                    if period_end_ts:
+                        db_sub.current_period_end = datetime.fromtimestamp(period_end_ts, tz=timezone.utc)
 
         elif event_type in ("invoice.paid", "customer.subscription.updated"):
             cust_id = event_data.get("customer")
@@ -292,6 +298,12 @@ class StripeBillingService:
                         db_sub.dunning_attempt_count = 0
                         db_sub.dunning_last_failed_at = None
                         db_sub.dunning_grace_period_until = None
+                    period_start_ts = event_data.get("current_period_start")
+                    period_end_ts = event_data.get("current_period_end")
+                    if period_start_ts:
+                        db_sub.current_period_start = datetime.fromtimestamp(period_start_ts, tz=timezone.utc)
+                    if period_end_ts:
+                        db_sub.current_period_end = datetime.fromtimestamp(period_end_ts, tz=timezone.utc)
 
         elif event_type in ("customer.subscription.deleted", "invoice.payment_failed"):
             cust_id = event_data.get("customer")

@@ -274,19 +274,7 @@ class UsageMeteringService:
         resource: str = "agent_turn",
         db: Optional[AsyncSession] = None
     ) -> Tuple[bool, str, Dict[str, Any]]:
-        """Enforces organization billing subscription quotas for agent turns, agent creation, and documents."""
-        sub = await self.get_or_create_subscription_async(organization_id, db=db)
-        plan_name = sub["plan_name"].upper()
-        limits = self.PLAN_LIMITS.get(plan_name, self.PLAN_LIMITS["FREE"])
-
-        # Enforce subscription status (canceled, past_due, unpaid)
-        sub_status = (sub.get("status") or "ACTIVE").upper()
-        if sub_status in ["CANCELED", "CANCELLED", "PAST_DUE", "UNPAID"]:
-            return False, f"Subscription is {sub_status}. Please update payment method or reactivate your subscription.", {"status": sub_status, "plan": plan_name}
-
-        now = datetime.now(timezone.utc)
-        billing_period_start = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
-
+        """Enforces organization billing subscription quotas with concurrency-safe row locking and billing period boundaries."""
         session = db or self.db_session
         is_local = False
         if not session:
@@ -296,16 +284,77 @@ class UsageMeteringService:
             except Exception:
                 session = None
 
-        current_usage = 0
+        sub_obj = None
+        if session:
+            try:
+                # Concurrency-safe row lock on Subscription
+                stmt = select(Subscription).where(Subscription.organization_id == organization_id).with_for_update()
+                res = await session.execute(stmt)
+                sub_obj = res.scalar_one_or_none()
+            except Exception as e:
+                logger.warning(f"[Metering] Row lock failed, falling back: {e}")
 
+        if not sub_obj:
+            sub = await self.get_or_create_subscription_async(organization_id, db=session)
+            plan_name = sub["plan_name"].upper()
+            sub_status = (sub.get("status") or "ACTIVE").upper()
+            max_convs = sub.get("max_conversations_per_month", 100)
+            max_agents = sub.get("max_agents", 1)
+            max_props = sub.get("max_properties", 1)
+            p_start = None
+            p_end = None
+            grace_until = None
+        else:
+            plan_name = sub_obj.plan_name.upper()
+            sub_status = (sub_obj.subscription_status or sub_obj.status or "ACTIVE").upper()
+            max_convs = sub_obj.max_conversations_per_month
+            max_agents = sub_obj.max_agents
+            max_props = sub_obj.max_properties
+            p_start = sub_obj.current_period_start
+            p_end = sub_obj.current_period_end
+            grace_until = sub_obj.dunning_grace_period_until
+
+        limits = self.PLAN_LIMITS.get(plan_name, self.PLAN_LIMITS["FREE"])
+        now = datetime.now(timezone.utc)
+
+        # 1. Enforce subscription status & dunning grace period
+        if sub_status in ["CANCELED", "CANCELLED", "UNPAID"]:
+            if is_local and session:
+                await session.close()
+            return False, f"Subscription is {sub_status}. Please update payment method or reactivate your subscription.", {"status": sub_status, "plan": plan_name}
+        elif sub_status == "PAST_DUE":
+            if grace_until:
+                grace_exp = grace_until.replace(tzinfo=timezone.utc) if grace_until.tzinfo is None else grace_until
+                if now > grace_exp:
+                    if is_local and session:
+                        await session.close()
+                    return False, "Subscription is PAST_DUE and grace period expired. Access suspended.", {"status": sub_status, "plan": plan_name}
+            else:
+                if is_local and session:
+                    await session.close()
+                return False, "Subscription is PAST_DUE. Access suspended.", {"status": sub_status, "plan": plan_name}
+
+        # 2. Derive billing period boundaries (Stripe current_period_start/end or calendar month)
+        if p_start and p_end:
+            billing_period_start = p_start.replace(tzinfo=timezone.utc) if p_start.tzinfo is None else p_start
+            billing_period_end = p_end.replace(tzinfo=timezone.utc) if p_end.tzinfo is None else p_end
+        else:
+            billing_period_start = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
+            if now.month == 12:
+                billing_period_end = datetime(now.year + 1, 1, 1, tzinfo=timezone.utc)
+            else:
+                billing_period_end = datetime(now.year, now.month + 1, 1, tzinfo=timezone.utc)
+
+        current_usage = 0
         try:
             if resource in ["agent_turn", "chat_message"]:
-                max_allowed = sub.get("max_conversations_per_month", limits["max_conversations"])
+                max_allowed = max_convs
                 if session:
                     stmt = select(func.count(UsageEvent.id)).where(
                         UsageEvent.organization_id == organization_id,
                         UsageEvent.event_type.in_(["agent_turn", "chat_message"]),
-                        UsageEvent.created_at >= billing_period_start
+                        UsageEvent.created_at >= billing_period_start,
+                        UsageEvent.created_at < billing_period_end
                     )
                     res = await session.execute(stmt)
                     current_usage = res.scalar() or 0
@@ -315,13 +364,14 @@ class UsageMeteringService:
                 if current_usage >= max_allowed:
                     return False, f"Monthly agent turn limit reached ({current_usage}/{max_allowed} turns) for plan '{plan_name}'", {"current": current_usage, "limit": max_allowed, "plan": plan_name}
 
-                # Per-tenant spend cap enforcement
+                # Per-tenant spend cap enforcement within current billing period
                 spend_caps = {"FREE": 5.0, "STARTER": 100.0, "PROFESSIONAL": 500.0, "BUSINESS": 2000.0, "ENTERPRISE": 10000.0}
                 max_spend = spend_caps.get(plan_name, 500.0)
                 if session:
                     stmt_cost = select(func.sum(UsageEvent.estimated_cost)).where(
                         UsageEvent.organization_id == organization_id,
-                        UsageEvent.created_at >= billing_period_start
+                        UsageEvent.created_at >= billing_period_start,
+                        UsageEvent.created_at < billing_period_end
                     )
                     res_cost = await session.execute(stmt_cost)
                     total_cost = res_cost.scalar() or 0.0
@@ -329,7 +379,7 @@ class UsageMeteringService:
                         return False, f"Monthly spend cap limit reached (${round(total_cost, 2)}/${max_spend}) for plan '{plan_name}'", {"total_cost": total_cost, "cap": max_spend, "plan": plan_name}
 
             elif resource in ["agent_creation", "create_agent"]:
-                max_allowed = sub.get("max_agents", limits["max_agents"])
+                max_allowed = max_agents
                 if session:
                     stmt = select(func.count(Agent.id)).where(Agent.organization_id == organization_id)
                     res = await session.execute(stmt)
@@ -355,9 +405,19 @@ class UsageMeteringService:
             elif resource in ["team_member_invite", "invite_user", "seats", "team_member"]:
                 max_allowed = limits.get("max_seats", 2)
                 if session:
-                    stmt = select(func.count(User.id)).where(User.organization_id == organization_id)
-                    res = await session.execute(stmt)
-                    current_usage = res.scalar() or 0
+                    stmt_users = select(func.count(User.id)).where(User.organization_id == organization_id, User.is_active == True)
+                    res_users = await session.execute(stmt_users)
+                    active_users = res_users.scalar() or 0
+
+                    from services.database.models import Invitation
+                    stmt_inv = select(func.count(Invitation.id)).where(
+                        Invitation.organization_id == organization_id,
+                        Invitation.accepted_at == None,
+                        Invitation.expires_at > now
+                    )
+                    res_inv = await session.execute(stmt_inv)
+                    pending_inv = res_inv.scalar() or 0
+                    current_usage = active_users + pending_inv
                 else:
                     current_usage = 1
 
@@ -366,7 +426,7 @@ class UsageMeteringService:
 
             elif resource in ["property_creation", "create_property", "properties"]:
                 from services.database.models import Property
-                max_allowed = sub.get("max_properties", limits.get("max_properties", 1))
+                max_allowed = max_props
                 if session:
                     stmt = select(func.count(Property.id)).where(Property.organization_id == organization_id)
                     res = await session.execute(stmt)

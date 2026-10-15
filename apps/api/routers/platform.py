@@ -6,9 +6,10 @@ from datetime import datetime, timezone
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Query
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select, func
+from sqlalchemy import select, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from apps.api.config import settings
 from services.database.session import get_db
 from services.database.models import User, Organization, Agent, IntegrationSource, UserRole
 from apps.api.auth import get_super_admin_user, decode_access_token
@@ -158,8 +159,50 @@ async def get_platform_telemetry(current_user: User = Depends(get_super_admin_us
             "timestamp": time_str
         })
 
-    system_health = "DEGRADED" if failed_integrations > 0 else "100% OPERATIONAL"
-    sla_uptime = "99.9%" if failed_integrations > 0 else "100.0%"
+    # Real component health checks (DB, Redis, Vector, Integrations)
+    db_ok = True
+    try:
+        r_db = await db.execute(text("SELECT 1"))
+        if r_db.scalar() != 1:
+            db_ok = False
+    except Exception:
+        db_ok = False
+
+    redis_ok = False
+    try:
+        import redis.asyncio as aioredis
+        r_client = aioredis.from_url(settings.REDIS_URL, socket_connect_timeout=0.5)
+        if await r_client.ping():
+            redis_ok = True
+        await r_client.aclose()
+    except Exception:
+        redis_ok = False
+
+    vector_ok = True
+    if "postgresql" in settings.DATABASE_URL:
+        try:
+            r_vec = await db.execute(text("SELECT 1 FROM pg_extension WHERE extname = 'vector'"))
+            if not r_vec.scalar():
+                vector_ok = False
+        except Exception:
+            vector_ok = False
+
+    # Compute operational status dynamically
+    components = [db_ok, redis_ok, vector_ok]
+    healthy_count = sum(1 for c in components if c)
+    if failed_integrations == 0:
+        healthy_count += 1
+    total_components = len(components) + 1
+
+    if not db_ok:
+        system_health = "CRITICAL_OUTAGE"
+        sla_uptime = f"{round((healthy_count / total_components) * 100, 1)}%"
+    elif not redis_ok or not vector_ok or failed_integrations > 0:
+        system_health = "DEGRADED"
+        sla_uptime = f"{round((healthy_count / total_components) * 100, 1)}%"
+    else:
+        system_health = "OPERATIONAL"
+        sla_uptime = "99.99%"
 
     return {
         "total_organizations": orgs_count,

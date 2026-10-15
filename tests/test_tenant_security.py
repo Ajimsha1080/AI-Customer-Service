@@ -100,7 +100,7 @@ async def test_super_admin_cross_tenant_access():
         # Super admin can fetch telemetry
         telem_res = await ac.get("/api/v1/platform/telemetry", headers=sa_headers)
         assert telem_res.status_code == 200
-        assert telem_res.json()["system_health"] in ["100% OPERATIONAL", "DEGRADED"]
+        assert telem_res.json()["system_health"] in ["OPERATIONAL", "DEGRADED", "CRITICAL_OUTAGE"]
 
         # Super admin can list all organizations
         orgs_res = await ac.get("/api/v1/organizations", headers=sa_headers)

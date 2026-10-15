@@ -66,7 +66,7 @@ async def readiness_check(db: AsyncSession = Depends(get_db)):
     except Exception:
         vector_status = "degraded"
 
-    overall_ready = (db_status == "connected" and redis_status == "connected")
+    overall_ready = (db_status == "connected" and redis_status == "connected" and vector_status == "connected")
     if not overall_ready and settings.ALERT_WEBHOOK_URL:
         try:
             import httpx
@@ -91,6 +91,7 @@ async def readiness_check(db: AsyncSession = Depends(get_db)):
     }
     if not overall_ready:
         from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content=content)
     return content
 
 @router.get("/status")

@@ -11,7 +11,7 @@ import pytest_asyncio
 from sqlalchemy import select, text
 from services.database.session import AsyncSessionLocal, engine, Base
 import services.database.models
-from services.database.models import User, Organization, UserRole, Property, LiveUpdate, Restaurant, Agent, AgentType
+from services.database.models import User, Organization, UserRole, Property, LiveUpdate, Restaurant, Agent, AgentType, Subscription
 from apps.api.auth import hash_password
 
 @pytest_asyncio.fixture(autouse=True, scope="function")
@@ -32,6 +32,24 @@ async def prepare_db():
         else:
             org.mfa_enforced = False
             org.status = "active"
+
+        res_sub = await db.execute(select(Subscription).where(Subscription.organization_id == "org_azure_group"))
+        sub = res_sub.scalar_one_or_none()
+        if not sub:
+            db.add(Subscription(
+                id="sub_azure_enterprise",
+                organization_id="org_azure_group",
+                plan_name="ENTERPRISE",
+                status="ACTIVE",
+                subscription_status="active",
+                max_agents=50,
+                max_properties=20,
+                max_conversations_per_month=50000
+            ))
+            await db.flush()
+        else:
+            sub.plan_name = "ENTERPRISE"
+            sub.subscription_status = "active"
 
         res_prop = await db.execute(select(Property).where(Property.id == "prop_azure_palm_resort"))
         prop = res_prop.scalar_one_or_none()

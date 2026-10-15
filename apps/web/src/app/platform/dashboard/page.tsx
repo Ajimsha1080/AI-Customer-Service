@@ -243,7 +243,7 @@ export default function PlatformDashboardPage() {
               <span className="text-[11px] font-semibold uppercase tracking-wider">System Health</span>
               <Activity className="w-4 h-4 text-emerald-500" />
             </div>
-            <div className="text-xl font-bold text-emerald-600 font-mono">{telemetry.system_health || '100% OPERATIONAL'}</div>
+            <div className="text-xl font-bold text-emerald-600 font-mono">{telemetry.system_health || 'OPERATIONAL'}</div>
             <div className="flex items-center justify-between text-xs font-mono pt-1">
               <span className="text-zinc-500">P95 Latency</span>
               <span className="font-semibold text-zinc-800">{telemetry.p95_latency_ms || 340}ms</span>
