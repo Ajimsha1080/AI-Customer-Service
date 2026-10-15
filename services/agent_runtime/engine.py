@@ -285,7 +285,8 @@ class AgentRuntimeEngine:
         # 1. REAL LLM & HEURISTIC GUARDRAIL PRE-CHECK
         guardrail_res = await self.check_guardrails(user_message, conversation_history, enabled_tools=enabled_tools)
         if not guardrail_res["is_safe"]:
-            debug_trace["guardrail_triggered"] = guardrail_res["reason"]
+            reason = guardrail_res["reason"]
+            debug_trace["guardrail_triggered"] = "PROMPT_INJECTION_PREVENTED" if "INJECTION" in reason else reason
             return {
                 "response": guardrail_res["message"],
                 "status": "AI_ACTIVE",
