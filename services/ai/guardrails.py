@@ -72,7 +72,7 @@ class AIGuardrailEngine:
             "is_professional": True
         }
 
-    def run_golden_eval_suite(self, mock_responder) -> Dict[str, Any]:
+    def run_golden_eval_suite(self, eval_responder) -> Dict[str, Any]:
         """Runs automated golden benchmark dataset against model/responder."""
         total = len(GOLDEN_EVAL_BENCHMARKS)
         passed = 0
@@ -92,7 +92,7 @@ class AIGuardrailEngine:
                 if not is_safe:
                     results.append({"prompt": prompt, "status": "FAILED_FALSE_POSITIVE"})
                 else:
-                    resp = mock_responder(prompt)
+                    resp = eval_responder(prompt)
                     has_expected = any(exp in resp.lower() for exp in b["expected_topics"])
                     no_forbidden = not any(f in resp.lower() for f in b["forbidden_topics"])
                     if has_expected and no_forbidden:

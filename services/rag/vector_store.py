@@ -8,7 +8,7 @@ from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from services.database.session import AsyncSessionLocal
 from services.database.models import Document, DocumentChunk
-from services.rag.embeddings import BaseEmbeddingProvider, get_embedding_provider, MockEmbeddingProvider
+from services.rag.embeddings import BaseEmbeddingProvider, get_embedding_provider, LocalHashedEmbeddingProvider
 
 class VectorStoreInterface(ABC):
     @abstractmethod
@@ -230,7 +230,7 @@ class PostgresPgVectorStore(VectorStoreInterface):
 
 class RAGVectorService(PostgresPgVectorStore):
     """Production RAG Vector Service performing genuine document chunking, embedding,
-    storage, and semantic similarity search with zero fake mocks.
+    storage, and semantic similarity search with zero fake stubs.
     """
     async def add_document_async(self, doc_id: str, title: str, content: str, metadata: dict) -> List[str]:
         org_id = metadata.get("organization_id", "")

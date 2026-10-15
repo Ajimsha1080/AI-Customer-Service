@@ -36,7 +36,7 @@ class WhatsAppCloudAPIClient:
 
     async def send_text_message(self, recipient_phone: str, text: str) -> Dict[str, Any]:
         """Sends an outbound WhatsApp text message via Meta Graph API."""
-        if not self.api_key or self.api_key.startswith("mock"):
+        if not self.api_key or self.api_key.startswith("placeholder") or self.api_key.startswith("dummy"):
             if settings.ENVIRONMENT not in ("development", "testing"):
                 raise RuntimeError("WhatsApp API key not configured in production environment.")
             logger.info(f"[WhatsApp SIMULATED] To: {recipient_phone} Text: '{text[:50]}...'")

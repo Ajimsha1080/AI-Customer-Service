@@ -1,7 +1,10 @@
 # SOC 2 Type II & HIPAA Compliance Control Matrix
 
-## 1. Overview
+## 1. Overview & Audit Disclaimer
 This document specifies the technical and organizational security controls implemented within Hospitality Agent Cloud (HAC) to satisfy American Institute of CPAs (AICPA) SOC 2 Type II Trust Services Criteria (Security, Availability, Confidentiality) and the Health Insurance Portability and Accountability Act (HIPAA) Security Rule (§ 164.308, § 164.312).
+
+> [!IMPORTANT]
+> **External Audit Requirement**: Implementation of technical controls within the codebase provides technical readiness and evidence generation capability only. Formal SOC 2 Type II attestation, ISO/IEC 27001 certification, and HIPAA compliance require independent examination, verification, and audit sign-off by an accredited external CPA auditing firm over a formal 3- to 6-month observation period.
 
 ---
 
@@ -16,7 +19,7 @@ This document specifies the technical and organizational security controls imple
 | **CC6.7** | Secure API & Integration Keys | `apps/api/routers/developer.py`, `services/integrations/webhooks.py` | Scoped API keys hashed with SHA-256, customer webhooks signed with HMAC-SHA256 (`t=...,v1=...`). |
 | **CC7.1** | Append-Only Immutable Audit Trail | `services/database/audit.py`, `apps/api/routers/gdpr.py` | Append-only SHA-256 hash chaining (`prev_hash`, `hash`), cryptographic tamper detection before SIEM export. |
 | **CC7.2** | Vulnerability Disclosure Policy | `apps/api/routers/health.py` | RFC 9116 `/.well-known/security.txt` published with contact and expiration. |
-| **A1.2** | Disaster Recovery & Backup Integrity | `scripts/backup_restore_drill.py` | Encrypted cross-region snapshot replication, automated PITR restore drills, RTO < 60s, RPO = 0s. |
+| **A1.2** | Disaster Recovery & Backup Integrity | `scripts/backup_restore_drill.py` | Encrypted snapshot replication, automated PITR restore drills (Target RTO < 15m, RPO < 5m on AWS RDS; drill verified in automated container runs). |
 
 ---
 

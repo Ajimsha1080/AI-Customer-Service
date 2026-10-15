@@ -168,6 +168,7 @@ async def test_concurrent_load_p95_latency_and_zero_cross_tenant_leakage(db_sess
     await db_session.commit()
 
     # Disable IP rate limiter for load testing
+    orig_limiter_enabled = getattr(app.state.limiter, "enabled", True)
     app.state.limiter.enabled = False
     from services.resilience.tenant_limiter import tenant_limiter
     orig_burst = tenant_limiter.default_burst_capacity
@@ -241,8 +242,8 @@ async def test_concurrent_load_p95_latency_and_zero_cross_tenant_leakage(db_sess
 
             status_codes = await asyncio.gather(*tasks)
 
-    # Re-enable rate limiter
-    app.state.limiter.enabled = True
+    # Restore rate limiter
+    app.state.limiter.enabled = orig_limiter_enabled
     tenant_limiter.default_burst_capacity = orig_burst
     tenant_limiter.default_rate_per_sec = orig_rate
 

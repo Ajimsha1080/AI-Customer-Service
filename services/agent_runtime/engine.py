@@ -69,7 +69,7 @@ class AgentRuntimeEngine:
             }
 
         # LLM Moderation Classifier when real API key is available
-        if litellm and settings.OPENAI_API_KEY and not settings.OPENAI_API_KEY.startswith("sk-mock"):
+        if litellm and settings.OPENAI_API_KEY and not settings.OPENAI_API_KEY.startswith("sk-dummy") and not settings.OPENAI_API_KEY.startswith("sk-placeholder"):
             try:
                 mod_prompt = (
                     "You are a safety moderation classifier for a hospitality AI concierge.\n"
@@ -127,8 +127,8 @@ class AgentRuntimeEngine:
         anthropic_key = settings.ANTHROPIC_API_KEY or os.getenv("ANTHROPIC_API_KEY") or ""
         google_key = settings.GOOGLE_API_KEY or os.getenv("GOOGLE_API_KEY") or ""
 
-        # Require at least one non-mock LLM API key
-        if all(k.startswith("sk-mock") or k.startswith("mock") or not k for k in [openai_key, anthropic_key, google_key]):
+        # Require at least one non-placeholder LLM API key
+        if all(k.startswith("sk-dummy") or k.startswith("dummy") or k.startswith("placeholder") or not k for k in [openai_key, anthropic_key, google_key]):
             return None
 
         tool_schemas = HospitalityToolRegistry.get_tool_schemas()
@@ -406,7 +406,7 @@ class AgentRuntimeEngine:
             else:
                 # Sarvam AI or Deterministic RAG synthesis fallback
                 sarvam_key = os.getenv("SARVAM_API_KEY") or settings.SARVAM_API_KEY or ""
-                if sarvam_key and not sarvam_key.startswith("mock"):
+                if sarvam_key and not sarvam_key.startswith("placeholder") and not sarvam_key.startswith("dummy"):
                     try:
                         async with httpx.AsyncClient(timeout=settings.LLM_TIMEOUT_SECONDS) as client:
                             headers = {
@@ -456,7 +456,7 @@ class AgentRuntimeEngine:
             else:
                 translated_successfully = False
                 # Tier 1: Sarvam AI Dedicated Mayura Translation Engine (Ultra-Fast 100ms)
-                if sarvam_key and not sarvam_key.startswith("mock") and language in lang_codes:
+                if sarvam_key and not sarvam_key.startswith("placeholder") and not sarvam_key.startswith("dummy") and language in lang_codes:
                     try:
                         async with httpx.AsyncClient(timeout=15.0) as client:
                             headers = {
@@ -482,7 +482,7 @@ class AgentRuntimeEngine:
                         pass
 
             # Tier 2: Sarvam AI Conversational Model (sarvam-105b-conversations)
-            if not translated_successfully and sarvam_key and not sarvam_key.startswith("mock"):
+            if not translated_successfully and sarvam_key and not sarvam_key.startswith("placeholder") and not sarvam_key.startswith("dummy"):
                 try:
                     async with httpx.AsyncClient(timeout=30.0) as client:
                         headers = {

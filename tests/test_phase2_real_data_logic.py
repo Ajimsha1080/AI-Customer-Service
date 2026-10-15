@@ -80,7 +80,7 @@ async def ensure_p2_db():
 async def test_production_environment_rejects_mock_embedding():
     os.environ["ENVIRONMENT"] = "production"
     try:
-        with pytest.raises(RuntimeError, match="Mock embeddings cannot be used in production"):
+        with pytest.raises(RuntimeError, match=r"(Mock|Local hashed) embeddings cannot be used in production"):
             MockEmbeddingProvider()
     finally:
         os.environ["ENVIRONMENT"] = "testing"

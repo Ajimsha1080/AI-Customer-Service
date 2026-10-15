@@ -45,11 +45,11 @@ test.describe('Hospitality Agent Cloud - Complete Enterprise End-to-End Workflow
     await page.goto('/app/knowledge');
     const fileInput = page.locator('input[type="file"]');
     if (await fileInput.isVisible()) {
-      const pdfMockHeader = '%PDF-1.4\n1 0 obj\n<< /Title (Guest Guide) >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF';
+      const samplePdfHeader = '%PDF-1.4\n1 0 obj\n<< /Title (Guest Guide) >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF';
       await fileInput.setInputFiles({
         name: 'hotel_directory.pdf',
         mimeType: 'application/pdf',
-        buffer: Buffer.from(pdfMockHeader)
+        buffer: Buffer.from(samplePdfHeader)
       });
       await page.click('button:has-text("Upload")');
     }

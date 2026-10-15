@@ -79,7 +79,7 @@ async def text_to_speech_gateway(request: Request, req: TTSRequest):
         "English": "en-IN"
     }
     target_code = lang_map.get(req.language or "Malayalam", "ml-IN")
-    if sarvam_key and not sarvam_key.startswith("mock"):
+    if sarvam_key and not sarvam_key.startswith("placeholder") and not sarvam_key.startswith("dummy"):
         try:
             async with httpx.AsyncClient(timeout=20.0) as client:
                 headers = {

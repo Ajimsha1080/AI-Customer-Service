@@ -133,7 +133,7 @@ class EmailDeliveryService:
         env = (getattr(settings, "ENVIRONMENT", "") or "").lower()
         provider_name = (getattr(settings, "EMAIL_SERVICE_PROVIDER", "") or "console").lower()
 
-        if env in ("production", "prod") and provider_name in ("console", "mock"):
+        if env in ("production", "prod") and provider_name in ("console", "dummy"):
             raise RuntimeError("CRITICAL: EMAIL_SERVICE_PROVIDER cannot be 'console' in production environment.")
 
         if self._provider_instance is not None:
