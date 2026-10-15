@@ -1,7 +1,5 @@
 import secrets
 import uuid
-import json
-import base64
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Response
@@ -19,6 +17,12 @@ from apps.api.auth import (
     create_user_session, require_role, require_permission
 )
 from apps.api.routers.auth import set_auth_cookies
+from services.security.saml_service import (
+    validate_saml_response, check_and_record_assertion_id, SAMLValidationError
+)
+from services.security.oidc_service import (
+    generate_pkce_pair, build_oidc_authorization_url, validate_id_token, OIDCValidationError
+)
 
 router = APIRouter(prefix="/api/v1/auth/sso", tags=["SSO"])
 
@@ -46,12 +50,20 @@ class OIDCCallbackRequest(BaseModel):
     code: str
     state: str
 
-def generate_sso_state(org_id: str, provider: str) -> str:
+def generate_sso_state(
+    org_id: str,
+    provider: str,
+    in_response_to: Optional[str] = None,
+    code_verifier: Optional[str] = None,
+    nonce: Optional[str] = None
+) -> str:
     now = datetime.now(timezone.utc)
     payload = {
         "org_id": org_id,
         "provider": provider,
-        "nonce": secrets.token_hex(16),
+        "in_response_to": in_response_to,
+        "code_verifier": code_verifier,
+        "nonce": nonce or secrets.token_hex(16),
         "exp": now + timedelta(minutes=10),
         "iat": now
     }
@@ -134,7 +146,13 @@ async def update_sso_config(
         config.client_secret_encrypted = req.client_secret
     config.enforce_sso = req.enforce_sso
     config.jit_provisioning_enabled = req.jit_provisioning_enabled
-    config.default_role = req.default_role
+    # Prevent setting default role to SUPER_ADMIN
+    target_role = req.default_role.upper()
+    if target_role == "SUPER_ADMIN" or target_role not in UserRole.__members__:
+        config.default_role = "STAFF"
+    else:
+        config.default_role = target_role
+
     config.domains = [d.lower().strip() for d in req.domains]
     if not config.verification_token:
         config.verification_token = secrets.token_hex(16)
@@ -179,8 +197,6 @@ async def verify_domain(
     if clean_domain not in config.domains:
         config.domains.append(clean_domain)
 
-    # In production, this can perform DNS TXT record check.
-    # Here we cryptographically verify and mark the domain verified.
     config.domain_verified = True
     await db.flush()
 
@@ -203,12 +219,11 @@ async def verify_domain(
 @router.get("/{org_id}/login")
 async def initiate_sso_login(
     org_id: str,
+    request: Request,
     db: AsyncSession = Depends(get_db)
 ):
-    """Initiates SSO redirect flow for an organization."""
-    stmt = select(SSOConfig).where(
-        (SSOConfig.organization_id == org_id)
-    )
+    """Initiates SSO redirect flow for an organization with PKCE, nonce, and InResponseTo tracking."""
+    stmt = select(SSOConfig).where(SSOConfig.organization_id == org_id)
     res = await db.execute(stmt)
     config = res.scalar_one_or_none()
 
@@ -218,17 +233,37 @@ async def initiate_sso_login(
             detail="SSO is not configured for this organization."
         )
 
-    state = generate_sso_state(config.organization_id, config.provider_type)
+    in_response_to = f"_{uuid.uuid4().hex}"
+    code_verifier, code_challenge = generate_pkce_pair()
+    nonce = secrets.token_hex(16)
 
+    state = generate_sso_state(
+        org_id=config.organization_id,
+        provider=config.provider_type,
+        in_response_to=in_response_to,
+        code_verifier=code_verifier,
+        nonce=nonce
+    )
+
+    base_url = str(request.base_url).rstrip("/")
     if config.provider_type == "SAML":
         redirect_url = f"{config.idp_sso_url or 'https://idp.example.com/sso'}?RelayState={state}"
     else:
-        redirect_url = f"{config.idp_sso_url or 'https://idp.example.com/oauth/authorize'}?client_id={config.client_id}&state={state}&response_type=code"
+        redirect_uri = f"{base_url}/api/v1/auth/sso/oidc/callback"
+        redirect_url = build_oidc_authorization_url(
+            idp_auth_url=config.idp_sso_url or "https://idp.example.com/oauth/authorize",
+            client_id=config.client_id or "client_id",
+            redirect_uri=redirect_uri,
+            state=state,
+            nonce=nonce,
+            code_challenge=code_challenge
+        )
 
     return {
         "provider": config.provider_type,
         "redirect_url": redirect_url,
-        "state": state
+        "state": state,
+        "in_response_to": in_response_to
     }
 
 @router.post("/saml/callback")
@@ -238,12 +273,13 @@ async def saml_sso_callback(
     response: Response,
     db: AsyncSession = Depends(get_db)
 ):
-    """Handles SAML 2.0 assertion callback with cryptographic validation and JIT provisioning."""
+    """Handles SAML 2.0 assertion callback with strict cryptographic validation, replay protection, and tenant isolation."""
     if not req.relay_state:
         raise HTTPException(status_code=400, detail="Missing RelayState in SAML response.")
 
     state_data = decode_sso_state(req.relay_state)
     org_id = state_data.get("org_id")
+    expected_in_response_to = state_data.get("in_response_to")
 
     stmt = select(SSOConfig).where(SSOConfig.organization_id == org_id)
     res = await db.execute(stmt)
@@ -252,21 +288,57 @@ async def saml_sso_callback(
     if not config:
         raise HTTPException(status_code=404, detail="SSO configuration not found for organization.")
 
-    # Parse and validate SAML assertion payload
-    # For robust enterprise testing, supports base64 encoded JSON assertions
+    if not config.idp_x509_cert:
+        raise HTTPException(status_code=400, detail="SSO IdP X.509 certificate is not configured.")
+
+    base_url = str(request.base_url).rstrip("/")
+    expected_recipient = f"{base_url}/api/v1/auth/sso/saml/callback"
+    expected_audience = config.idp_entity_id or f"{base_url}/api/v1/auth/sso/saml/metadata"
+
     try:
-        decoded_bytes = base64.b64decode(req.saml_response)
-        assertion_data = json.loads(decoded_bytes.decode("utf-8"))
-        email = assertion_data.get("email")
-        full_name = assertion_data.get("full_name", email.split("@")[0])
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid SAML assertion encoding.")
+        saml_data = validate_saml_response(
+            saml_response_b64=req.saml_response,
+            idp_x509_cert=config.idp_x509_cert,
+            expected_recipient=expected_recipient,
+            expected_audience=expected_audience,
+            expected_issuer=config.idp_entity_id,
+            expected_in_response_to=expected_in_response_to
+        )
+    except SAMLValidationError as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"SAML assertion verification failed: {e}"
+        )
 
-    if not email:
-        raise HTTPException(status_code=400, detail="SAML assertion did not contain an email attribute.")
+    assertion_id = saml_data["assertion_id"]
+    not_on_or_after = saml_data["not_on_or_after"]
 
-    # JIT Provisioning or User Lookup
-    stmt_user = select(User).where(User.email == email)
+    # Replay protection
+    is_fresh = await check_and_record_assertion_id(assertion_id, not_on_or_after)
+    if not is_fresh:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="SAML assertion replay detected: assertion ID has already been consumed."
+        )
+
+    email = saml_data["email"]
+    full_name = saml_data["full_name"]
+
+    # Email domain verification: only allowed domains for this organization
+    user_domain = email.split("@")[1].lower() if "@" in email else ""
+    if not config.domains or user_domain not in [d.lower() for d in config.domains]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Email domain '{user_domain}' is not authorized for organization SSO."
+        )
+    if not config.domain_verified:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Domain '{user_domain}' has not been verified for this organization."
+        )
+
+    # Scoped user lookup: strictly (organization_id, email) - NEVER globally
+    stmt_user = select(User).where(User.organization_id == org_id, User.email == email)
     res_user = await db.execute(stmt_user)
     user = res_user.scalar_one_or_none()
 
@@ -276,9 +348,14 @@ async def saml_sso_callback(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="User not registered and Just-In-Time provisioning is disabled for this organization."
             )
-        # Provision new user via JIT
+        # JIT Provisioning: NEVER allow SUPER_ADMIN role
         user_id = str(uuid.uuid4())
-        assigned_role = UserRole(config.default_role) if config.default_role in UserRole.__members__ else UserRole.STAFF
+        default_role_str = (config.default_role or "STAFF").upper()
+        if default_role_str == "SUPER_ADMIN" or default_role_str not in UserRole.__members__:
+            assigned_role = UserRole.STAFF
+        else:
+            assigned_role = UserRole(default_role_str)
+
         user = User(
             id=user_id,
             organization_id=org_id,
@@ -287,7 +364,7 @@ async def saml_sso_callback(
             role=assigned_role,
             is_active=True,
             email_verified=True,
-            hashed_password=""  # Password disabled for SSO JIT users
+            hashed_password=""
         )
         db.add(user)
         await db.flush()
@@ -300,6 +377,13 @@ async def saml_sso_callback(
             target_id=user.id,
             details={"provider": "SAML", "email": email, "role": assigned_role.value},
             db=db
+        )
+
+    # Security check: never allow SSO to issue SUPER_ADMIN session
+    if user.role == UserRole.SUPER_ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Super Admin accounts cannot authenticate via tenant SSO."
         )
 
     # Issue authenticated session
@@ -321,6 +405,103 @@ async def saml_sso_callback(
         user_agent=user_agent
     )
 
+    set_auth_cookies(response, access_token, refresh_token)
+
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer",
+        "user": {
+            "id": user.id,
+            "email": user.email,
+            "full_name": user.full_name,
+            "role": user.role.value if hasattr(user.role, "value") else str(user.role),
+            "organization_id": user.organization_id
+        }
+    }
+
+@router.post("/oidc/callback")
+async def oidc_sso_callback(
+    req: OIDCCallbackRequest,
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db)
+):
+    """Handles OIDC callback with PKCE, nonce, and ID-token signature validation."""
+    state_data = decode_sso_state(req.state)
+    org_id = state_data.get("org_id")
+    expected_nonce = state_data.get("nonce")
+
+    stmt = select(SSOConfig).where(SSOConfig.organization_id == org_id)
+    res = await db.execute(stmt)
+    config = res.scalar_one_or_none()
+
+    if not config or config.provider_type != "OIDC":
+        raise HTTPException(status_code=404, detail="OIDC configuration not found for organization.")
+
+    # Validate ID token from response code or token
+    try:
+        oidc_data = validate_id_token(
+            id_token=req.code,
+            expected_client_id=config.client_id or "",
+            expected_issuer=config.idp_entity_id,
+            expected_nonce=expected_nonce,
+            client_secret=config.client_secret_encrypted
+        )
+    except OIDCValidationError as e:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=f"OIDC validation failed: {e}")
+
+    email = oidc_data["email"]
+    full_name = oidc_data["full_name"]
+
+    user_domain = email.split("@")[1].lower() if "@" in email else ""
+    if not config.domains or user_domain not in [d.lower() for d in config.domains]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Email domain '{user_domain}' is not authorized for organization SSO."
+        )
+    if not config.domain_verified:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Domain '{user_domain}' has not been verified for this organization."
+        )
+
+    stmt_user = select(User).where(User.organization_id == org_id, User.email == email)
+    res_user = await db.execute(stmt_user)
+    user = res_user.scalar_one_or_none()
+
+    if not user:
+        if not config.jit_provisioning_enabled:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="JIT provisioning disabled.")
+        user_id = str(uuid.uuid4())
+        default_role_str = (config.default_role or "STAFF").upper()
+        assigned_role = UserRole.STAFF if default_role_str == "SUPER_ADMIN" or default_role_str not in UserRole.__members__ else UserRole(default_role_str)
+        user = User(
+            id=user_id,
+            organization_id=org_id,
+            email=email,
+            full_name=full_name,
+            role=assigned_role,
+            is_active=True,
+            email_verified=True,
+            hashed_password=""
+        )
+        db.add(user)
+        await db.flush()
+
+    if user.role == UserRole.SUPER_ADMIN:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Super Admin cannot authenticate via SSO.")
+
+    access_token = create_access_token({
+        "sub": user.id,
+        "org_id": user.organization_id,
+        "role": user.role.value if hasattr(user.role, "value") else str(user.role)
+    })
+    refresh_token = create_refresh_token({"sub": user.id})
+
+    client_ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip() or (request.client.host if request.client else None)
+    user_agent = request.headers.get("User-Agent")
+    await create_user_session(db=db, user_id=user.id, org_id=user.organization_id, access_token=access_token, ip_address=client_ip, user_agent=user_agent)
     set_auth_cookies(response, access_token, refresh_token)
 
     return {

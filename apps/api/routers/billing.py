@@ -156,8 +156,19 @@ async def get_analytics(
     usage_events = usage_res.scalars().all()
     events_count = len(usage_events)
 
-    escalated_count = sum(1 for c in conversations if c.is_human_takeover or c.status == ConversationStatus.ESCALATED)
-    resolved_count = convs_count - escalated_count
+    escalation_statuses = {
+        ConversationStatus.HUMAN_REQUESTED,
+        ConversationStatus.HUMAN_ACTIVE,
+        ConversationStatus.HUMAN_STAFF_TAKEN_OVER,
+    }
+    escalated_count = sum(
+        1 for c in conversations
+        if bool(c.is_human_takeover) or (c.status in escalation_statuses)
+    )
+    resolved_count = sum(
+        1 for c in conversations
+        if c.status == ConversationStatus.RESOLVED and not c.is_human_takeover
+    )
 
     ai_res_rate = f"{(resolved_count / convs_count * 100):.1f}%" if convs_count > 0 else "0.0%"
     human_esc_rate = f"{(escalated_count / convs_count * 100):.1f}%" if convs_count > 0 else "0.0%"

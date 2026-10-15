@@ -1,0 +1,3 @@
+Customer Notice: Support access was granted to {{ org_name }} until {{ expires_at }} by {{ granted_by }}.
+
+All actions performed during this support window are audited and recorded in your organization audit logs.

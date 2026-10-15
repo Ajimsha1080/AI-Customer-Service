@@ -68,6 +68,16 @@ class Settings(BaseSettings):
     LANGSMITH_TRACING: str = "false"
     LANGSMITH_API_KEY: Optional[str] = None
 
+    EMAIL_SERVICE_PROVIDER: str = "console"  # "console", "smtp", "sendgrid", "ses"
+    SMTP_HOST: str = "localhost"
+    SMTP_PORT: int = 1025
+    SMTP_USER: Optional[str] = None
+    SMTP_PASSWORD: Optional[str] = None
+    SMTP_USE_TLS: bool = False
+    SMTP_STARTTLS: bool = False
+    SENDGRID_API_KEY: Optional[str] = None
+    DEFAULT_FROM_EMAIL: str = "noreply@concierge-ai.com"
+
     LLM_TIMEOUT_SECONDS: float = 15.0
     DEFAULT_LLM_MODEL: str = "gpt-4o-mini"
 
@@ -110,6 +120,10 @@ class Settings(BaseSettings):
             lower_val = str(val).lower()
             return any(sub in lower_val for sub in forbidden_substrings)
 
+        # 0. Email Provider Refusal
+        if self.EMAIL_SERVICE_PROVIDER.lower() in ("console", "mock"):
+            raise ValueError("CRITICAL SECURITY RISK: EMAIL_SERVICE_PROVIDER cannot be 'console' or 'mock' in production!")
+
         # 1. JWT and App Secrets
         if is_insecure(self.SECRET_KEY):
             raise ValueError("CRITICAL SECURITY RISK: SECRET_KEY must be configured in production without 'mock', 'dev_', or 'change'!")
@@ -150,13 +164,15 @@ class Settings(BaseSettings):
         if self.WHATSAPP_API_KEY and is_insecure(self.WHATSAPP_API_KEY):
             raise ValueError("CRITICAL SECURITY RISK: WHATSAPP_API_KEY cannot be a mock value in production!")
 
-        # 6. Database & Redis & CORS
+        # 6. Database & Redis & CORS & Email
         if is_insecure(self.DATABASE_URL) or "sqlite" in self.DATABASE_URL.lower():
             raise ValueError("CRITICAL SECURITY RISK: DATABASE_URL must be a real PostgreSQL connection in production!")
         if is_insecure(self.REDIS_URL):
             raise ValueError("CRITICAL SECURITY RISK: REDIS_URL must be configured in production!")
         if not self.CORS_ORIGINS or "*" in self.CORS_ORIGINS:
             raise ValueError("CRITICAL SECURITY RISK: CORS_ORIGINS must be explicitly configured in production without wildcards!")
+        if self.EMAIL_SERVICE_PROVIDER.lower() in ("console", "mock"):
+            raise ValueError("CRITICAL SECURITY RISK: EMAIL_SERVICE_PROVIDER cannot be 'console' or 'mock' in production!")
 
         return self
 

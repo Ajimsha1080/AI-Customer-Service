@@ -253,11 +253,33 @@ async def test_sso_config_domain_verification_enforcement_and_jit(db_session):
     org_id = reg.json()["user"]["organization_id"]
     headers = {"Authorization": f"Bearer {token}"}
 
-    # Step 1: Configure SSO
+    # Generate test IdP certificate and private key
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography import x509
+    from datetime import datetime, timezone, timedelta
+    from services.security.saml_service import create_signed_saml_response
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    cert = x509.CertificateBuilder().subject_name(
+        x509.Name([x509.NameAttribute(x509.oid.NameOID.COMMON_NAME, f"idp.{domain}")])
+    ).issuer_name(
+        x509.Name([x509.NameAttribute(x509.oid.NameOID.COMMON_NAME, f"idp.{domain}")])
+    ).public_key(key.public_key()).serial_number(1).not_valid_before(
+        datetime.now(timezone.utc) - timedelta(days=1)
+    ).not_valid_after(
+        datetime.now(timezone.utc) + timedelta(days=365)
+    ).sign(key, hashes.SHA256())
+
+    cert_pem = cert.public_bytes(serialization.Encoding.PEM).decode()
+    key_pem = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()).decode()
+
+    # Step 1: Configure SSO with real IdP certificate
     cfg_res = client.put("/api/v1/auth/sso/config", headers=headers, json={
         "provider_type": "SAML",
         "idp_entity_id": f"https://idp.{domain}/saml",
         "idp_sso_url": f"https://idp.{domain}/sso/login",
+        "idp_x509_cert": cert_pem,
         "domains": [domain],
         "enforce_sso": True,
         "jit_provisioning_enabled": True,
@@ -284,17 +306,23 @@ async def test_sso_config_domain_verification_enforcement_and_jit(db_session):
     init_res = client.get(f"/api/v1/auth/sso/{org_id}/login")
     assert init_res.status_code == 200
     relay_state = init_res.json()["state"]
+    in_response_to = init_res.json()["in_response_to"]
 
-    # Step 5: SAML Callback with Just-In-Time (JIT) provisioning for a new employee
+    # Step 5: SAML Callback with Just-In-Time (JIT) provisioning for a new employee using signed XML assertion
     jit_email = f"new_jit_employee@{domain}"
-    saml_payload = {
-        "email": jit_email,
-        "full_name": "New JIT Employee"
-    }
-    encoded_assertion = base64.b64encode(json.dumps(saml_payload).encode()).decode()
+    signed_assertion = create_signed_saml_response(
+        issuer=f"https://idp.{domain}/saml",
+        audience=f"https://idp.{domain}/saml",
+        recipient="http://testserver/api/v1/auth/sso/saml/callback",
+        in_response_to=in_response_to,
+        email=jit_email,
+        full_name="New JIT Employee",
+        private_key_pem=key_pem,
+        cert_pem=cert_pem
+    )
 
     cb_res = client.post("/api/v1/auth/sso/saml/callback", json={
-        "saml_response": encoded_assertion,
+        "saml_response": signed_assertion,
         "relay_state": relay_state
     })
     assert cb_res.status_code == 200

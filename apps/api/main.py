@@ -157,7 +157,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 from apps.api.routers import (
     health, auth, agents, voice, billing, integrations, platform, conversations,
     organizations, hospitality_crud, mfa, sessions, sso, scim, custom_roles, gdpr,
-    developer
+    developer, email_webhooks
 )
 
 app.include_router(health.router)
@@ -177,5 +177,6 @@ app.include_router(integrations.router)
 app.include_router(platform.router)
 app.include_router(conversations.router)
 app.include_router(hospitality_crud.router)
+app.include_router(email_webhooks.router)
 
 

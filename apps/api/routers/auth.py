@@ -1,7 +1,8 @@
 import re
 import time
 import uuid
-from datetime import datetime, timezone
+import hashlib
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Response
 from pydantic import BaseModel, EmailStr
@@ -11,7 +12,7 @@ import httpx
 
 from apps.api.config import settings
 from services.database.session import get_db
-from services.database.models import User, Organization, UserRole, Invitation, SSOConfig
+from services.database.models import User, Organization, UserRole, Invitation, SSOConfig, RevokedToken
 from services.database.audit import record_audit_log_async
 from apps.api.auth import (
     hash_password, verify_password,
@@ -281,10 +282,12 @@ async def login(request: Request, req: LoginRequest, response: Response, db: Asy
         res_sso = await db.execute(stmt_sso)
         sso_cfg = res_sso.scalar_one_or_none()
         if sso_cfg and sso_cfg.enforce_sso:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="SSO_REQUIRED: Password login is disabled for your organization. Please log in using SSO."
-            )
+            user_domain = user.email.split("@")[1].lower() if "@" in user.email else ""
+            if not sso_cfg.domains or user_domain in [d.lower() for d in sso_cfg.domains]:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="SSO_REQUIRED: Password login is disabled for your organization. Please log in using SSO."
+                )
 
     # Multi-Factor Authentication Challenge
     mfa_required = bool(user.mfa_enabled)
@@ -504,15 +507,16 @@ async def get_me(current_user: User = Depends(get_current_user)):
 @router.post("/forgot-password")
 @limiter.limit("5/minute")
 async def forgot_password(request: Request, req: ForgotPasswordRequest, db: AsyncSession = Depends(get_db)):
-    """Generates a secure password reset token (timing-safe response)."""
+    """Generates a secure password reset token (timing-safe response with anti-enumeration protection)."""
     stmt = select(User).where(User.email == req.email)
     res = await db.execute(stmt)
     user = res.scalar_one_or_none()
 
     reset_token = None
     if user and user.is_active:
+        jti = str(uuid.uuid4())
         reset_token = create_access_token(
-            {"sub": user.id, "email": user.email, "scope": "password_reset"},
+            {"sub": user.id, "email": user.email, "scope": "password_reset", "jti": jti},
             expires_delta=timedelta(hours=1)
         )
         await email_service.send_email(
@@ -524,6 +528,9 @@ async def forgot_password(request: Request, req: ForgotPasswordRequest, db: Asyn
                 "reset_url": f"http://localhost:3002/reset-password?token={reset_token}"
             }
         )
+    else:
+        # Anti-enumeration timing mitigation: constant-time dummy hashing work
+        hash_password("timing_safe_dummy_constant_for_enumeration_defense")
 
     return {
         "message": "If this email exists in our system, a password reset link has been dispatched.",
@@ -533,7 +540,7 @@ async def forgot_password(request: Request, req: ForgotPasswordRequest, db: Asyn
 @router.post("/reset-password")
 @limiter.limit("5/minute")
 async def reset_password(request: Request, req: ResetPasswordRequest, db: AsyncSession = Depends(get_db)):
-    """Validates reset token and updates account password with Argon2 hash."""
+    """Validates reset token, enforces single-use invalidation, and updates account password with Argon2 hash."""
     from jose import jwt, JWTError
     validate_password_policy(req.new_password)
     try:
@@ -544,6 +551,12 @@ async def reset_password(request: Request, req: ResetPasswordRequest, db: AsyncS
     except JWTError:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired password reset token")
 
+    token_hash = hashlib.sha256(req.token.encode()).hexdigest()
+    stmt_rev = select(RevokedToken).where((RevokedToken.token == token_hash) | (RevokedToken.token == req.token))
+    res_rev = await db.execute(stmt_rev)
+    if res_rev.scalar_one_or_none():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Password reset token has already been used or revoked.")
+
     stmt = select(User).where(User.id == user_id)
     res = await db.execute(stmt)
     user = res.scalar_one_or_none()
@@ -551,7 +564,10 @@ async def reset_password(request: Request, req: ResetPasswordRequest, db: AsyncS
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
     user.hashed_password = hash_password(req.new_password)
+    # Record token as revoked for single-use guarantee
+    db.add(RevokedToken(token=token_hash))
     await db.flush()
+
     await record_audit_log_async(
         org_id=user.organization_id,
         user_id=user.id,
@@ -565,7 +581,7 @@ async def reset_password(request: Request, req: ResetPasswordRequest, db: AsyncS
 
 @router.post("/verify-email")
 async def verify_email(req: VerifyEmailRequest, db: AsyncSession = Depends(get_db)):
-    """Verifies user email token."""
+    """Verifies user email token with single-use invalidation."""
     from jose import jwt, JWTError
     try:
         payload = jwt.decode(req.token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
@@ -575,6 +591,12 @@ async def verify_email(req: VerifyEmailRequest, db: AsyncSession = Depends(get_d
     except JWTError:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired verification token")
 
+    token_hash = hashlib.sha256(req.token.encode()).hexdigest()
+    stmt_rev = select(RevokedToken).where((RevokedToken.token == token_hash) | (RevokedToken.token == req.token))
+    res_rev = await db.execute(stmt_rev)
+    if res_rev.scalar_one_or_none():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Verification token has already been used or revoked.")
+
     stmt = select(User).where(User.id == user_id)
     res = await db.execute(stmt)
     user = res.scalar_one_or_none()
@@ -583,5 +605,6 @@ async def verify_email(req: VerifyEmailRequest, db: AsyncSession = Depends(get_d
 
     user.is_active = True
     user.email_verified = True
+    db.add(RevokedToken(token=token_hash))
     await db.flush()
     return {"message": "Email address verified successfully. You may now log in."}

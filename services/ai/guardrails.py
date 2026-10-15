@@ -1,6 +1,6 @@
 import re
 import logging
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Tuple, Optional
 
 logger = logging.getLogger("hospitality_agent_cloud.ai.guardrails")
 

@@ -1,0 +1,6 @@
+Hello {{ name }},
+
+Please verify your email address to activate your account:
+{{ verify_url }}
+
+If you did not register for an account, please disregard this email.

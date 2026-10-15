@@ -1,0 +1,8 @@
+Hello,
+
+You have been invited to join {{ org_name }} as {{ role }}.
+
+Accept your invitation here:
+{{ invite_url }}
+
+This link will expire in 7 days.

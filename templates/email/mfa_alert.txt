@@ -1,0 +1,3 @@
+Security Alert: MFA was enabled or modified on your account at {{ timestamp }} from IP {{ ip }}.
+
+If you did not perform this action, please contact your security administrator immediately.
