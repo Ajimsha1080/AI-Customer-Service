@@ -83,6 +83,22 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
+    @model_validator(mode="before")
+    @classmethod
+    def parse_cors_origins(cls, data: object):
+        if isinstance(data, dict) and "CORS_ORIGINS" in data:
+            val = data["CORS_ORIGINS"]
+            if isinstance(val, str):
+                if val.startswith("["):
+                    import json
+                    try:
+                        data["CORS_ORIGINS"] = json.loads(val)
+                    except Exception:
+                        data["CORS_ORIGINS"] = [v.strip() for v in val.split(",") if v.strip()]
+                else:
+                    data["CORS_ORIGINS"] = [v.strip() for v in val.split(",") if v.strip()]
+        return data
+
     @model_validator(mode="after")
     def validate_production_secrets(self) -> "Settings":
         import secrets

@@ -84,6 +84,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
+    expose_headers=["X-Request-ID", "X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset", "Retry-After", "X-Audit-Chain-Verified", "X-Verified-Record-Count"],
 )
 
 # --- REQUEST ID & STRUCTURED LOGGING MIDDLEWARE ---
