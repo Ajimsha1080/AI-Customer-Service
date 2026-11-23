@@ -9,7 +9,7 @@ from jose import jwt
 
 from apps.api.main import app
 from apps.api.config import settings
-from services.security.saml_service import create_signed_saml_response
+from tests.saml_test_helpers import create_signed_saml_response
 from services.security.oidc_service import generate_pkce_pair
 
 client = TestClient(app)

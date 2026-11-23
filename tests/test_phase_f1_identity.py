@@ -258,7 +258,7 @@ async def test_sso_config_domain_verification_enforcement_and_jit(db_session):
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography import x509
     from datetime import datetime, timezone, timedelta
-    from services.security.saml_service import create_signed_saml_response
+    from tests.saml_test_helpers import create_signed_saml_response
 
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     cert = x509.CertificateBuilder().subject_name(
