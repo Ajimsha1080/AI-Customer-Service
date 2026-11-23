@@ -135,12 +135,20 @@ async def create_invitation(
             detail="Only organization Admins or Owners may invite new members."
         )
 
-    # Cannot invite OWNER
-    target_role_str = req.role.upper()
-    if target_role_str == "OWNER":
+    # C3: Explicit allowlist and hierarchy checks for invitations
+    target_role_str = req.role.upper().strip()
+    if target_role_str not in ALLOWED_TENANT_ASSIGNABLE_ROLES:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cannot invite another OWNER. Organization ownership is single-principal."
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Invalid tenant role: '{req.role}'. Permitted invitation roles are: {sorted(ALLOWED_TENANT_ASSIGNABLE_ROLES)}"
+        )
+
+    caller_rank = ROLE_HIERARCHY.get(caller_role_val, 0)
+    target_rank = ROLE_HIERARCHY.get(target_role_str, 0)
+    if caller_rank <= target_rank:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Caller ({caller_role_val}) may only invite roles strictly below their own."
         )
 
     # Check if user already in org

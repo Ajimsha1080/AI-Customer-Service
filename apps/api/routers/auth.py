@@ -20,7 +20,7 @@ from apps.api.auth import (
     decode_refresh_token_async, revoke_refresh_token,
     get_current_user, generate_oauth_state, verify_oauth_state,
     check_login_lockout, record_failed_login, reset_login_failures,
-    create_user_session
+    create_user_session, ROLE_HIERARCHY
 )
 from services.security.limiter import limiter
 from services.security.password_policy import validate_password_policy
@@ -213,7 +213,35 @@ async def accept_invitation(req: AcceptInvitationRequest, response: Response, db
         )
 
     validate_password_policy(req.password)
-    assigned_role = UserRole(inv.role) if inv.role in UserRole.__members__ else UserRole.STAFF
+
+    # C3: Re-verify role against tenant allowlist and inviter role hierarchy
+    from apps.api.routers.organizations import ALLOWED_TENANT_ASSIGNABLE_ROLES
+    target_role_str = inv.role.upper().strip()
+    if target_role_str not in ALLOWED_TENANT_ASSIGNABLE_ROLES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Invalid tenant role in invitation: '{inv.role}'. Permitted roles are: {sorted(ALLOWED_TENANT_ASSIGNABLE_ROLES)}"
+        )
+
+    if inv.invited_by_user_id:
+        stmt_inviter = select(User).where(User.id == inv.invited_by_user_id)
+        res_inviter = await db.execute(stmt_inviter)
+        inviter = res_inviter.scalar_one_or_none()
+        if not inviter or not inviter.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Inviting user account is inactive or not found."
+            )
+        inviter_role_val = inviter.role.value if hasattr(inviter.role, "value") else str(inviter.role)
+        inviter_rank = ROLE_HIERARCHY.get(inviter_role_val, 0)
+        target_rank = ROLE_HIERARCHY.get(target_role_str, 0)
+        if inviter_rank <= target_rank:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Inviter ({inviter_role_val}) no longer outranks the invited role ({target_role_str})."
+            )
+
+    assigned_role = UserRole(target_role_str)
     user_id = str(uuid.uuid4())
     user = User(
         id=user_id,
