@@ -233,6 +233,8 @@ async def list_members(
         "created_at": u.created_at.isoformat()
     } for u in users]
 
+ALLOWED_TENANT_ASSIGNABLE_ROLES = {"ADMIN", "STAFF", "VIEWER"}
+
 @router.patch("/organizations/{organization_id}/members/{user_id}")
 async def update_member_role(
     organization_id: str,
@@ -241,13 +243,23 @@ async def update_member_role(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    """Updates a member's role. Requires ADMIN or OWNER."""
+    """Updates a member's role with strict privilege boundary checks and audit logging."""
     org_id = verify_tenant_access(current_user, organization_id)
     caller_role_val = current_user.role.value if hasattr(current_user.role, "value") else str(current_user.role)
-    if ROLE_HIERARCHY.get(caller_role_val, 0) < ROLE_HIERARCHY.get(UserRole.ADMIN, 80):
+    caller_rank = ROLE_HIERARCHY.get(caller_role_val, 0)
+    admin_rank = ROLE_HIERARCHY.get(UserRole.ADMIN, 80)
+    if caller_rank < admin_rank:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Admin permissions required to update member roles."
+        )
+
+    # 1. Target role must be in allowlist of assignable tenant roles (unknown / SUPER_ADMIN -> 422)
+    target_role_str = req.role.upper().strip()
+    if target_role_str not in ALLOWED_TENANT_ASSIGNABLE_ROLES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Invalid tenant role: '{req.role}'. Permitted roles are: {sorted(ALLOWED_TENANT_ASSIGNABLE_ROLES)}"
         )
 
     stmt = select(User).where((User.id == user_id) & (User.organization_id == org_id))
@@ -256,12 +268,51 @@ async def update_member_role(
     if not target_user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Member not found.")
 
-    target_role_str = req.role.upper()
-    if target_role_str == "OWNER" and caller_role_val != "OWNER" and caller_role_val != "SUPER_ADMIN":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only the OWNER can transfer ownership.")
+    # 2. Caller cannot change their own role
+    if current_user.id == target_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Callers cannot modify their own role."
+        )
+
+    target_current_role = target_user.role.value if hasattr(target_user.role, "value") else str(target_user.role)
+    
+    # 3. Caller cannot touch the OWNER
+    if target_current_role == "OWNER" or target_current_role == UserRole.OWNER.value:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Cannot modify the role of an organization OWNER."
+        )
+
+    # 4. Caller may only assign roles strictly below their own
+    new_role_rank = ROLE_HIERARCHY.get(target_role_str, 0)
+    target_current_rank = ROLE_HIERARCHY.get(target_current_role, 0)
+
+    if caller_rank <= new_role_rank:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Caller ({caller_role_val}) may only assign roles strictly below their own."
+        )
+
+    if caller_rank <= target_current_rank:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Caller ({caller_role_val}) cannot modify a member with equal or higher role ({target_current_role})."
+        )
 
     target_user.role = UserRole(target_role_str) if target_role_str in UserRole.__members__ else target_role_str
     await db.flush()
+
+    # 5. Audit-log every change
+    await record_audit_log_async(
+        org_id=org_id,
+        user_id=current_user.id,
+        action="MEMBER_ROLE_UPDATED",
+        target_type="user",
+        target_id=target_user.id,
+        details={"old_role": target_current_role, "new_role": target_role_str},
+        db=db
+    )
 
     return {"id": target_user.id, "role": target_role_str}
 

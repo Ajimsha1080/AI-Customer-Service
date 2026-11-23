@@ -469,13 +469,29 @@ def require_permission(permission: str):
 
 ROLE_HIERARCHY = {
     UserRole.SUPER_ADMIN: 100,
+    "SUPER_ADMIN": 100,
     UserRole.OWNER: 90,
+    "OWNER": 90,
     UserRole.ORGANIZATION_ADMIN: 80,
+    "ORGANIZATION_ADMIN": 80,
     UserRole.ADMIN: 80,
+    "ADMIN": 80,
+    UserRole.MANAGER: 70,
+    "MANAGER": 70,
     UserRole.PROPERTY_ADMIN: 60,
+    "PROPERTY_ADMIN": 60,
     UserRole.STAFF: 40,
+    "STAFF": 40,
+    UserRole.RECEPTIONIST: 40,
+    "RECEPTIONIST": 40,
+    UserRole.SUPPORT_AGENT: 40,
+    "SUPPORT_AGENT": 40,
     UserRole.ANALYST: 30,
+    "ANALYST": 30,
     UserRole.VIEWER: 10,
+    "VIEWER": 10,
+    UserRole.GUEST: 0,
+    "GUEST": 0,
 }
 
 def require_role(min_role: UserRole):
