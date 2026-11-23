@@ -81,6 +81,10 @@ class Settings(BaseSettings):
     LLM_TIMEOUT_SECONDS: float = 15.0
     DEFAULT_LLM_MODEL: str = "gpt-4o-mini"
 
+    @property
+    def is_production(self) -> bool:
+        return self.ENVIRONMENT.lower() in ("production", "prod")
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     @model_validator(mode="before")
