@@ -502,6 +502,28 @@ async def resolve_platform_incident(
     return inc
 
 
+@router.get("/settings")
+async def get_platform_infrastructure_settings(
+    current_user: User = Depends(get_super_admin_user)
+):
+    """Returns masked infrastructure secrets for super admins only."""
+    def _mask_secret(val: Optional[str]) -> str:
+        if not val:
+            return "Not Configured"
+        if len(val) <= 8:
+            return "•" * len(val)
+        return f"{val[:3]}{'•' * (len(val) - 7)}{val[-4:]}"
+
+    return {
+        "sarvam_api_key_configured": bool(settings.SARVAM_API_KEY),
+        "sarvam_api_key_masked": _mask_secret(settings.SARVAM_API_KEY),
+        "openai_api_key_configured": bool(settings.OPENAI_API_KEY),
+        "openai_api_key_masked": _mask_secret(settings.OPENAI_API_KEY),
+        "anthropic_api_key_configured": bool(settings.ANTHROPIC_API_KEY),
+        "anthropic_api_key_masked": _mask_secret(settings.ANTHROPIC_API_KEY),
+    }
+
+
 @router.get("/localization/ui-strings", tags=["Localization"])
 async def get_localization_ui_strings(locale: str = Query("en")):
     """Returns localized UI strings and RTL direction for guest and staff portal."""

@@ -1,0 +1,23 @@
+title = "Gitleaks Security Configuration"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Global allowlist for non-sensitive documentation, examples and mock test fixtures"
+paths = [
+    '''(?i)^\.env\.example$''',
+    '''(?i)^tests/.*''',
+    '''(?i)^docs/.*''',
+    '''(?i).*\.test\.(js|ts|jsx|tsx)$''',
+    '''(?i).*package-lock\.json$''',
+]
+regexes = [
+    '''sk-proj-xxxxxxxx''',
+    '''sk-ant-xxxxxxxx''',
+    '''wa_app_secret_test''',
+    '''wa_verify_token_test''',
+    '''test_jwt_secret''',
+    '''development_secret_key''',
+    '''dev_jwt_secret_key''',
+]
