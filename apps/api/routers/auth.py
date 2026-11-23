@@ -17,6 +17,7 @@ from services.database.audit import record_audit_log_async
 from apps.api.auth import (
     hash_password, verify_password,
     create_access_token, create_refresh_token,
+    create_password_reset_token, revoke_all_user_sessions,
     decode_refresh_token_async, revoke_refresh_token,
     get_current_user, generate_oauth_state, verify_oauth_state,
     check_login_lockout, record_failed_login, reset_login_failures,
@@ -543,8 +544,8 @@ async def forgot_password(request: Request, req: ForgotPasswordRequest, db: Asyn
     reset_token = None
     if user and user.is_active:
         jti = str(uuid.uuid4())
-        reset_token = create_access_token(
-            {"sub": user.id, "email": user.email, "scope": "password_reset", "jti": jti},
+        reset_token = create_password_reset_token(
+            {"sub": user.id, "email": user.email, "jti": jti},
             expires_delta=timedelta(hours=1)
         )
         await email_service.send_email(
@@ -568,21 +569,52 @@ async def forgot_password(request: Request, req: ForgotPasswordRequest, db: Asyn
 @router.post("/reset-password")
 @limiter.limit("5/minute")
 async def reset_password(request: Request, req: ResetPasswordRequest, db: AsyncSession = Depends(get_db)):
-    """Validates reset token, enforces single-use invalidation, and updates account password with Argon2 hash."""
+    """Validates reset token, enforces single-use invalidation, revokes all sessions, and updates password."""
     from jose import jwt, JWTError
     validate_password_policy(req.new_password)
     try:
-        payload = jwt.decode(req.token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
-        if payload.get("scope") != "password_reset":
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid token scope")
+        payload = jwt.decode(
+            req.token,
+            settings.JWT_SECRET_KEY,
+            algorithms=[settings.JWT_ALGORITHM],
+            options={"verify_aud": False}
+        )
+        if payload.get("token_type") != "password_reset" or payload.get("aud") != "password_reset":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid token type or audience for password reset."
+            )
         user_id = payload.get("sub")
+        jti = payload.get("jti")
     except JWTError:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired password reset token")
 
+    if not jti:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Password reset token missing jti.")
+
+    # 1. Single-use check: Redis & DB RevokedToken
+    jti_key = f"reset_jti:{jti}"
     token_hash = hashlib.sha256(req.token.encode()).hexdigest()
-    stmt_rev = select(RevokedToken).where((RevokedToken.token == token_hash) | (RevokedToken.token == req.token))
+
+    try:
+        import redis.asyncio as aioredis
+        r = aioredis.from_url(settings.REDIS_URL, socket_connect_timeout=0.3)
+        ok = await r.set(jti_key, "1", nx=True, ex=3600)
+        await r.aclose()
+        if not ok:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Password reset token has already been used.")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+
+    stmt_rev = select(RevokedToken).where(
+        (RevokedToken.token == jti_key) | 
+        (RevokedToken.token == token_hash) | 
+        (RevokedToken.token == req.token)
+    )
     res_rev = await db.execute(stmt_rev)
-    if res_rev.scalar_one_or_none():
+    if res_rev.scalars().first():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Password reset token has already been used or revoked.")
 
     stmt = select(User).where(User.id == user_id)
@@ -593,7 +625,11 @@ async def reset_password(request: Request, req: ResetPasswordRequest, db: AsyncS
 
     user.hashed_password = hash_password(req.new_password)
     # Record token as revoked for single-use guarantee
+    db.add(RevokedToken(token=jti_key))
     db.add(RevokedToken(token=token_hash))
+
+    # C5: Revoke all active user sessions and refresh tokens on password reset
+    await revoke_all_user_sessions(db=db, user_id=user.id)
     await db.flush()
 
     await record_audit_log_async(

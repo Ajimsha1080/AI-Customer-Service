@@ -38,12 +38,50 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     now = datetime.now(timezone.utc)
     expire = now + (expires_delta or timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES))
     to_encode.update({
-        "jti": str(uuid.uuid4()),
+        "jti": to_encode.get("jti", str(uuid.uuid4())),
         "exp": expire,
         "iat": now,
-        "token_type": "access"
+        "token_type": to_encode.get("token_type", "access"),
+        "aud": to_encode.get("aud", "access")
     })
     return jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
+
+def create_special_token(
+    token_type: str,
+    aud: str,
+    data: dict,
+    expires_delta: Optional[timedelta] = None
+) -> str:
+    """Generates an isolated, aud-restricted cryptographic token."""
+    to_encode = data.copy()
+    now = datetime.now(timezone.utc)
+    expire = now + (expires_delta or timedelta(minutes=30))
+    to_encode.update({
+        "jti": to_encode.get("jti", str(uuid.uuid4())),
+        "exp": expire,
+        "iat": now,
+        "token_type": token_type,
+        "aud": aud
+    })
+    return jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
+
+def create_password_reset_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+    return create_special_token("password_reset", "password_reset", data, expires_delta or timedelta(hours=1))
+
+def create_email_verify_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+    return create_special_token("email_verify", "email_verify", data, expires_delta or timedelta(hours=24))
+
+def create_invitation_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+    return create_special_token("invitation", "invitation", data, expires_delta or timedelta(days=7))
+
+def create_mfa_challenge_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+    return create_special_token("mfa_challenge", "mfa_challenge", data, expires_delta or timedelta(minutes=5))
+
+def create_realtime_ticket_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+    return create_special_token("realtime_ticket", "realtime_ticket", data, expires_delta or timedelta(seconds=60))
+
+def create_oauth_state_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+    return create_special_token("oauth_state", "oauth_state", data, expires_delta or timedelta(minutes=10))
 
 import uuid
 import hashlib
@@ -89,13 +127,19 @@ def create_refresh_token(data: dict, expires_delta: Optional[timedelta] = None) 
     return jwt.encode(to_encode, settings.JWT_REFRESH_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 
 def decode_access_token(token: str) -> dict:
-    """Decodes and validates a JWT access token."""
+    """Decodes and validates a JWT access token. Accepts ONLY login access tokens."""
     try:
-        payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
-        if payload.get("token_type") != "access":
+        payload = jwt.decode(
+            token,
+            settings.JWT_SECRET_KEY,
+            algorithms=[settings.JWT_ALGORITHM],
+            options={"verify_aud": False}
+        )
+        if payload.get("token_type") != "access" or payload.get("aud") != "access":
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid token type. Access token required."
+                detail="Invalid token type or audience. Only login access tokens accepted.",
+                headers={"WWW-Authenticate": "Bearer"}
             )
         return payload
     except JWTError:
