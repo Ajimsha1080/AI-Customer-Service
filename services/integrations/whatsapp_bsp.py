@@ -16,13 +16,30 @@ class WhatsAppBusinessService:
     - Meta X-Hub-Signature-256 validation.
     - 24-hour Customer Care Window enforcement (requires registered template if closed).
     """
-    def __init__(self, verify_token: str = "wa_verify_token_default", app_secret: str = "wa_app_secret_default"):
-        self.verify_token = verify_token
-        self.app_secret = app_secret
+    def __init__(self, verify_token: Optional[str] = None, app_secret: Optional[str] = None):
+        self._custom_verify_token = verify_token
+        self._custom_app_secret = app_secret
+
+    @property
+    def verify_token(self) -> str:
+        if self._custom_verify_token is not None:
+            return self._custom_verify_token
+        from apps.api.config import settings
+        return settings.WHATSAPP_VERIFY_TOKEN or ""
+
+    @property
+    def app_secret(self) -> str:
+        if self._custom_app_secret is not None:
+            return self._custom_app_secret
+        from apps.api.config import settings
+        return settings.WHATSAPP_APP_SECRET or ""
 
     def verify_webhook_challenge(self, mode: str, token: str, challenge: str) -> Optional[str]:
         """Handles Meta webhook verification GET request."""
-        if mode == "subscribe" and token == self.verify_token:
+        if not self.verify_token:
+            logger.warning("[WhatsApp] Webhook challenge failed: WHATSAPP_VERIFY_TOKEN is not configured.")
+            return None
+        if mode == "subscribe" and token and hmac.compare_digest(token, self.verify_token):
             logger.info("[WhatsApp] Webhook challenge verified successfully.")
             return challenge
         logger.warning(f"[WhatsApp] Webhook challenge failed (mode={mode}).")
@@ -30,9 +47,15 @@ class WhatsAppBusinessService:
 
     def verify_inbound_signature(self, payload_bytes: bytes, signature_header: str) -> bool:
         """Verifies Meta X-Hub-Signature-256 header: 'sha256=<hex>'."""
+        if not self.app_secret:
+            logger.warning("[WhatsApp] Webhook signature verification failed: WHATSAPP_APP_SECRET is not configured.")
+            return False
         if not signature_header or not signature_header.startswith("sha256="):
             return False
-        provided_sig = signature_header.split("=")[1]
+        parts = signature_header.split("=", 1)
+        if len(parts) != 2:
+            return False
+        provided_sig = parts[1]
         expected_sig = hmac.new(self.app_secret.encode("utf-8"), payload_bytes, hashlib.sha256).hexdigest()
         return hmac.compare_digest(provided_sig, expected_sig)
 

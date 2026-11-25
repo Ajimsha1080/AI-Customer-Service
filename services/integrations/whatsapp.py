@@ -13,10 +13,10 @@ class WhatsAppCloudAPIClient:
     """Meta WhatsApp Business Cloud API Client & Webhook Verifier."""
 
     def __init__(self):
-        self.api_key = settings.WHATSAPP_API_KEY
+        self.api_key = settings.WHATSAPP_ACCESS_TOKEN or settings.WHATSAPP_API_KEY
         self.phone_number_id = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
-        self.app_secret = os.getenv("WHATSAPP_APP_SECRET", "")
-        self.verify_token = os.getenv("WHATSAPP_VERIFY_TOKEN", "")
+        self.app_secret = settings.WHATSAPP_APP_SECRET or os.getenv("WHATSAPP_APP_SECRET", "")
+        self.verify_token = settings.WHATSAPP_VERIFY_TOKEN or os.getenv("WHATSAPP_VERIFY_TOKEN", "")
 
     def verify_webhook_signature(self, payload_bytes: bytes, signature_header: str) -> bool:
         """Verifies X-Hub-Signature-256 header sent by Meta webhooks."""

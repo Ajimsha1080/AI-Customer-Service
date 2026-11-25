@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     ELEVENLABS_API_KEY: Optional[str] = None
 
     WHATSAPP_API_KEY: Optional[str] = None
+    WHATSAPP_ACCESS_TOKEN: Optional[str] = None
+    WHATSAPP_APP_SECRET: Optional[str] = None
+    WHATSAPP_VERIFY_TOKEN: Optional[str] = None
     PAYMENT_PROVIDER_KEY: Optional[str] = None
     STRIPE_SECRET_KEY: Optional[str] = None
     STRIPE_WEBHOOK_SECRET: Optional[str] = None
@@ -132,6 +135,10 @@ class Settings(BaseSettings):
                 self.STRIPE_PRICE_ENTERPRISE = "price_enterprise_test"
             if not self.OPENAI_API_KEY:
                 self.OPENAI_API_KEY = "sk-test-openai-key"
+            if not self.WHATSAPP_APP_SECRET:
+                self.WHATSAPP_APP_SECRET = secrets.token_hex(32)
+            if not self.WHATSAPP_VERIFY_TOKEN:
+                self.WHATSAPP_VERIFY_TOKEN = secrets.token_hex(16)
             return self
 
         # Strict Production Enforcement: Refuse to boot if ANY secret is unset or contains dummy/placeholder/dev values
@@ -185,6 +192,10 @@ class Settings(BaseSettings):
             raise ValueError("CRITICAL SECURITY RISK: ELEVENLABS_API_KEY must be provided in production when using ElevenLabs!")
 
         # 5. WhatsApp
+        if is_insecure(self.WHATSAPP_APP_SECRET):
+            raise ValueError("CRITICAL SECURITY RISK: WHATSAPP_APP_SECRET must be configured in production!")
+        if is_insecure(self.WHATSAPP_VERIFY_TOKEN):
+            raise ValueError("CRITICAL SECURITY RISK: WHATSAPP_VERIFY_TOKEN must be configured in production!")
         if self.WHATSAPP_API_KEY and is_insecure(self.WHATSAPP_API_KEY):
             raise ValueError("CRITICAL SECURITY RISK: WHATSAPP_API_KEY cannot be a placeholder value in production!")
 

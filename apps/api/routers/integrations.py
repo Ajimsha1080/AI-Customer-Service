@@ -31,10 +31,11 @@ def extract_text_from_file_bytes(filename: str, content_bytes: bytes) -> str:
             return content_bytes.decode("utf-8", errors="ignore")
     return content_bytes.decode("utf-8", errors="ignore")
 
-from services.database.session import get_db
+from services.database.session import get_db, set_tenant_context
 from services.database.models import (
     User, KnowledgeDocument, LiveUpdate, IntegrationSource, DataAccessPolicy,
-    AuditLog, Agent, AgentStatus, AgentConfig, Organization, UserSession
+    AuditLog, Agent, AgentStatus, AgentConfig, Organization, UserSession,
+    WhatsAppChannelMapping, ProcessedWebhookEvent
 )
 from apps.api.auth import get_current_user, verify_tenant_access, _hash_token, decode_guest_session_token
 from services.billing.metering import SaaSMeteringService
@@ -912,8 +913,6 @@ async def verify_whatsapp_webhook(
     verified = whatsapp_bsp.verify_webhook_challenge(hub_mode or "", hub_verify_token or "", hub_challenge or "")
     if verified is not None:
         return int(verified) if str(verified).isdigit() else verified
-    if hub_mode == "subscribe" and whatsapp_client.verify_token and hub_verify_token == whatsapp_client.verify_token:
-        return int(hub_challenge) if hub_challenge and hub_challenge.isdigit() else hub_challenge
     raise HTTPException(status_code=403, detail="WhatsApp Webhook verification failed. Invalid verify_token.")
 
 @router.post("/api/v1/integrations/whatsapp/webhook", tags=["WhatsApp Integration"], dependencies=[Depends(enforce_tenant_fair_use_quota)])
@@ -927,7 +926,7 @@ async def process_whatsapp_inbound_webhook(request: Request, db: AsyncSession = 
 
     payload_bytes = await request.body()
     signature = request.headers.get("x-hub-signature-256") or ""
-    is_valid_sig = whatsapp_bsp.verify_inbound_signature(payload_bytes, signature) or whatsapp_client.verify_webhook_signature(payload_bytes, signature)
+    is_valid_sig = whatsapp_bsp.verify_inbound_signature(payload_bytes, signature)
     if not is_valid_sig:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid WhatsApp webhook signature.")
 
@@ -942,14 +941,62 @@ async def process_whatsapp_inbound_webhook(request: Request, db: AsyncSession = 
     for entry in entries:
         for change in entry.get("changes", []):
             val = change.get("value", {})
-            phone_number_id = val.get("metadata", {}).get("phone_number_id", "")
+            phone_number_id = str(val.get("metadata", {}).get("phone_number_id", ""))
+            if not phone_number_id:
+                continue
+
+            # Route by metadata.phone_number_id through per-tenant channel-mapping table
+            stmt_map = select(WhatsAppChannelMapping).where(
+                WhatsAppChannelMapping.phone_number_id == phone_number_id,
+                WhatsAppChannelMapping.is_active == True
+            )
+            res_map = await db.execute(stmt_map)
+            mapping = res_map.scalar_one_or_none()
+            if not mapping:
+                # Security control C7: drop unmapped messages
+                continue
+
+            # Set tenant context
+            await set_tenant_context(db, mapping.organization_id)
+
             messages = val.get("messages", [])
             for msg in messages:
+                msg_id = msg.get("id")
+                if not msg_id:
+                    continue
+
+                # Deduplicate by message ID (Redis + Postgres)
+                redis_client = getattr(request.app.state, "redis", None)
+                if redis_client:
+                    try:
+                        dedupe_key = f"wa_msg:{msg_id}"
+                        is_new = await redis_client.set(dedupe_key, "1", nx=True, ex=86400)
+                        if not is_new:
+                            continue
+                    except Exception:
+                        pass
+
+                stmt_dedupe = select(ProcessedWebhookEvent).where(ProcessedWebhookEvent.event_id == f"wa_{msg_id}")
+                res_dedupe = await db.execute(stmt_dedupe)
+                if res_dedupe.scalar_one_or_none():
+                    continue
+
+                db.add(ProcessedWebhookEvent(
+                    id=f"wa_{msg_id}",
+                    event_id=f"wa_{msg_id}",
+                    event_type="whatsapp_inbound"
+                ))
+                await db.flush()
+
                 sender_phone = msg.get("from")
                 msg_body = msg.get("text", {}).get("body", "")
                 if sender_phone and msg_body:
-                    # Look up active agent for tenant
-                    stmt = select(Agent).where(Agent.status == AgentStatus.ACTIVE).limit(1)
+                    # Look up specifically mapped active agent for this tenant
+                    stmt = select(Agent).where(
+                        Agent.id == mapping.agent_id,
+                        Agent.organization_id == mapping.organization_id,
+                        Agent.status == AgentStatus.ACTIVE
+                    )
                     agent_res = await db.execute(stmt)
                     agent = agent_res.scalar_one_or_none()
 
@@ -968,8 +1015,8 @@ async def process_whatsapp_inbound_webhook(request: Request, db: AsyncSession = 
                             agent_config=agent_config_dict,
                             user_message=msg_body,
                             conversation_history=[],
-                            organization_id=agent.organization_id,
-                            property_id=agent.property_id,
+                            organization_id=mapping.organization_id,
+                            property_id=mapping.property_id or agent.property_id,
                             agent_id=agent.id,
                             channel="whatsapp",
                             user_context={"user_role": "guest", "user_id": sender_phone}
@@ -991,6 +1038,6 @@ async def process_whatsapp_inbound_webhook(request: Request, db: AsyncSession = 
                             await whatsapp_circuit_breaker.call(_send_reply)
                         except CircuitBreakerOpenError as cbe:
                             logger.error(f"WhatsApp circuit breaker open: {cbe}")
-                    processed_count += 1
+                        processed_count += 1
 
     return {"status": "SUCCESS", "events_processed": processed_count}

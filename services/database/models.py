@@ -618,3 +618,16 @@ class ApiKey(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=get_utc_now)
 
+
+class WhatsAppChannelMapping(Base):
+    __tablename__ = "whatsapp_channel_mappings"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
+    phone_number_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    organization_id: Mapped[str] = mapped_column(String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    property_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("properties.id", ondelete="CASCADE"), nullable=True)
+    agent_id: Mapped[str] = mapped_column(String(36), ForeignKey("agents.id", ondelete="CASCADE"), nullable=False, index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=get_utc_now)
+
+
