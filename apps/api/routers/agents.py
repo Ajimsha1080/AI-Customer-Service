@@ -10,10 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from services.database.session import get_db, set_tenant_context
 from services.database.models import (
-    User, Agent, AgentConfig, UserRole, Conversation, Message,
+    User, Agent, AgentStatus, AgentConfig, UserRole, Conversation, Message,
     SupportTicket, ConversationStatus
 )
-from apps.api.auth import get_current_user, verify_tenant_access, ROLE_HIERARCHY
+from apps.api.auth import get_current_user, verify_tenant_access, ROLE_HIERARCHY, create_guest_session_token, decode_guest_session_token
 from packages.agent_sdk.sdk import HospitalityAgentSDK
 from services.agent_runtime.engine import AgentRuntimeEngine
 from services.billing.metering import SaaSMeteringService
@@ -44,10 +44,11 @@ class UpdateAgentConfigRequest(BaseModel):
     enabled_tools: Optional[List[str]] = None
 
 class AgentChatRequest(BaseModel):
-    organization_id: str
-    property_id: str
     message: str
+    organization_id: Optional[str] = None
+    property_id: Optional[str] = None
     conversation_id: Optional[str] = None
+    guest_token: Optional[str] = None
     channel: str = "web_widget"
     language: Optional[str] = "English"
 
@@ -263,12 +264,17 @@ async def agent_chat(request: Request, agent_id: str, req: AgentChatRequest, db:
             detail=f"Agent '{agent_id}' not found."
         )
 
-    if req.organization_id and req.organization_id != agent.organization_id:
+    # Security Control (C8): Reject chat for non-ACTIVE agents
+    if agent.status != AgentStatus.ACTIVE:
+        status_val = agent.status.value if hasattr(agent.status, "value") else str(agent.status)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Mismatched organization_id. Agent '{agent_id}' belongs to tenant '{agent.organization_id}'."
+            detail=f"Agent '{agent_id}' is not active (status: {status_val})."
         )
+
+    # Derive org and property strictly from the agent record server-side
     effective_org_id = agent.organization_id
+    effective_prop_id = agent.property_id
     await set_tenant_context(db, effective_org_id)
 
     # Per-tenant fair-use token bucket rate limiter
@@ -288,16 +294,30 @@ async def agent_chat(request: Request, agent_id: str, req: AgentChatRequest, db:
     if not allowed:
         raise HTTPException(status_code=status.HTTP_402_PAYMENT_REQUIRED, detail=f"Billing quota exceeded: {reason}")
 
-    # 1. Resolve or provision Conversation
-    conv_id = req.conversation_id or str(uuid.uuid4())
-    conv_stmt = select(Conversation).where(Conversation.id == conv_id)
-    conv_res = await db.execute(conv_stmt)
-    conv = conv_res.scalar_one_or_none()
+    # 1. Resolve or provision Conversation with strict tenant & agent boundary checking
+    conv = None
+    token_to_verify = req.guest_token or request.headers.get("x-guest-token")
+    if req.conversation_id:
+        conv_stmt = select(Conversation).where(Conversation.id == req.conversation_id)
+        conv_res = await db.execute(conv_stmt)
+        candidate_conv = conv_res.scalar_one_or_none()
+        if candidate_conv and candidate_conv.agent_id == agent.id and candidate_conv.organization_id == effective_org_id:
+            if token_to_verify:
+                try:
+                    gdata = decode_guest_session_token(token_to_verify)
+                    if gdata.get("conv_id") == candidate_conv.id and gdata.get("org_id") == effective_org_id:
+                        conv = candidate_conv
+                except Exception:
+                    conv = None
+            else:
+                conv = candidate_conv
+
     if not conv:
+        conv_id = f"conv_{uuid.uuid4().hex[:12]}"
         conv = Conversation(
             id=conv_id,
             organization_id=effective_org_id,
-            property_id=req.property_id,
+            property_id=effective_prop_id,
             agent_id=agent_id,
             channel=req.channel,
             customer_name="Guest",
@@ -306,6 +326,8 @@ async def agent_chat(request: Request, agent_id: str, req: AgentChatRequest, db:
         )
         db.add(conv)
         await db.flush()
+
+    guest_session_token = create_guest_session_token(conversation_id=conv.id, organization_id=effective_org_id)
 
     # 2. Persist guest message turn
     guest_msg = Message(
@@ -328,11 +350,12 @@ async def agent_chat(request: Request, agent_id: str, req: AgentChatRequest, db:
                 "content": req.message
             },
             organization_id=effective_org_id,
-            property_id=req.property_id
+            property_id=effective_prop_id
         )
         await db.commit()
         return {
             "conversation_id": conv.id,
+            "guest_token": guest_session_token,
             "response": "A front desk staff member has taken over this conversation and will respond shortly.",
             "status": "HUMAN_STAFF_TAKEN_OVER",
             "is_human_takeover": True
@@ -368,7 +391,7 @@ async def agent_chat(request: Request, agent_id: str, req: AgentChatRequest, db:
         user_message=req.message,
         conversation_history=conversation_history,
         organization_id=effective_org_id,
-        property_id=req.property_id,
+        property_id=effective_prop_id,
         agent_id=agent_id,
         channel=req.channel,
         language=req.language,
@@ -393,7 +416,7 @@ async def agent_chat(request: Request, agent_id: str, req: AgentChatRequest, db:
         ticket = SupportTicket(
             id=str(uuid.uuid4()),
             conversation_id=conv.id,
-            property_id=req.property_id,
+            property_id=effective_prop_id,
             issue_summary=f"Guest requested staff assistance: {req.message[:200]}",
             status="OPEN",
             priority="HIGH"
@@ -407,7 +430,7 @@ async def agent_chat(request: Request, agent_id: str, req: AgentChatRequest, db:
                 "summary": ticket.issue_summary
             },
             organization_id=effective_org_id,
-            property_id=req.property_id
+            property_id=effective_prop_id
         )
 
     # 6. Persist AI response message
@@ -424,7 +447,7 @@ async def agent_chat(request: Request, agent_id: str, req: AgentChatRequest, db:
     # 7. Record metering usage event
     await metering_service.record_usage_event_async(
         organization_id=effective_org_id,
-        property_id=req.property_id,
+        property_id=effective_prop_id,
         agent_id=agent_id,
         event_type="agent_turn",
         provider="litellm",
@@ -442,10 +465,11 @@ async def agent_chat(request: Request, agent_id: str, req: AgentChatRequest, db:
             "response": ai_msg.content
         },
         organization_id=effective_org_id,
-        property_id=req.property_id
+        property_id=effective_prop_id
     )
 
     result["conversation_id"] = conv.id
+    result["guest_token"] = guest_session_token
     await db.commit()
     return result
 
@@ -459,12 +483,16 @@ async def agent_chat_stream(request: Request, agent_id: str, req: AgentChatReque
     if not agent:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Agent '{agent_id}' not found.")
 
-    if req.organization_id and req.organization_id != agent.organization_id:
+    # Security Control (C8): Reject chat for non-ACTIVE agents
+    if agent.status != AgentStatus.ACTIVE:
+        status_val = agent.status.value if hasattr(agent.status, "value") else str(agent.status)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Mismatched organization_id. Agent '{agent_id}' belongs to tenant '{agent.organization_id}'."
+            detail=f"Agent '{agent_id}' is not active (status: {status_val})."
         )
+
     effective_org_id = agent.organization_id
+    effective_prop_id = agent.property_id
     await set_tenant_context(db, effective_org_id)
 
     # Per-tenant fair-use token bucket rate limiter
@@ -484,15 +512,30 @@ async def agent_chat_stream(request: Request, agent_id: str, req: AgentChatReque
     if not allowed:
         raise HTTPException(status_code=status.HTTP_402_PAYMENT_REQUIRED, detail=f"Billing quota exceeded: {reason}")
 
-    conv_id = req.conversation_id or str(uuid.uuid4())
-    conv_stmt = select(Conversation).where(Conversation.id == conv_id)
-    conv_res = await db.execute(conv_stmt)
-    conv = conv_res.scalar_one_or_none()
+    # 1. Resolve or provision Conversation with strict tenant & agent boundary checking
+    conv = None
+    token_to_verify = req.guest_token or request.headers.get("x-guest-token")
+    if req.conversation_id:
+        conv_stmt = select(Conversation).where(Conversation.id == req.conversation_id)
+        conv_res = await db.execute(conv_stmt)
+        candidate_conv = conv_res.scalar_one_or_none()
+        if candidate_conv and candidate_conv.agent_id == agent.id and candidate_conv.organization_id == effective_org_id:
+            if token_to_verify:
+                try:
+                    gdata = decode_guest_session_token(token_to_verify)
+                    if gdata.get("conv_id") == candidate_conv.id and gdata.get("org_id") == effective_org_id:
+                        conv = candidate_conv
+                except Exception:
+                    conv = None
+            else:
+                conv = candidate_conv
+
     if not conv:
+        conv_id = f"conv_{uuid.uuid4().hex[:12]}"
         conv = Conversation(
             id=conv_id,
             organization_id=effective_org_id,
-            property_id=req.property_id,
+            property_id=effective_prop_id,
             agent_id=agent_id,
             channel=req.channel,
             customer_name="Guest",
@@ -501,6 +544,8 @@ async def agent_chat_stream(request: Request, agent_id: str, req: AgentChatReque
         )
         db.add(conv)
         await db.flush()
+
+    guest_session_token = create_guest_session_token(conversation_id=conv.id, organization_id=effective_org_id)
 
     guest_msg = Message(
         id=str(uuid.uuid4()),
@@ -521,14 +566,14 @@ async def agent_chat_stream(request: Request, agent_id: str, req: AgentChatReque
                 "content": req.message
             },
             organization_id=effective_org_id,
-            property_id=req.property_id
+            property_id=effective_prop_id
         )
         await db.commit()
 
         async def takeover_stream():
             takeover_text = "A front desk staff member has taken over this conversation and will respond shortly."
             yield f"data: {json.dumps({'token': takeover_text, 'done': False})}\n\n"
-            yield f"data: {json.dumps({'response': takeover_text, 'done': True, 'conversation_id': conv.id, 'status': 'HUMAN_STAFF_TAKEN_OVER'})}\n\n"
+            yield f"data: {json.dumps({'response': takeover_text, 'done': True, 'conversation_id': conv.id, 'guest_token': guest_session_token, 'status': 'HUMAN_STAFF_TAKEN_OVER'})}\n\n"
 
         return StreamingResponse(takeover_stream(), media_type="text/event-stream")
 
@@ -548,7 +593,7 @@ async def agent_chat_stream(request: Request, agent_id: str, req: AgentChatReque
         user_message=req.message,
         conversation_history=[],
         organization_id=effective_org_id,
-        property_id=req.property_id,
+        property_id=effective_prop_id,
         agent_id=agent_id,
         channel=req.channel,
         language=req.language
@@ -570,7 +615,7 @@ async def agent_chat_stream(request: Request, agent_id: str, req: AgentChatReque
             chunk = word + (" " if i < len(words) - 1 else "")
             yield f"data: {json.dumps({'token': chunk, 'done': False})}\n\n"
             await asyncio.sleep(0.02)
-        yield f"data: {json.dumps({'response': full_response, 'done': True, 'conversation_id': conv.id})}\n\n"
+        yield f"data: {json.dumps({'response': full_response, 'done': True, 'conversation_id': conv.id, 'guest_token': guest_session_token})}\n\n"
 
     return StreamingResponse(
         token_generator(),

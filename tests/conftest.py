@@ -22,6 +22,8 @@ async def prepare_db():
 
     async with AsyncSessionLocal() as db:
         await db.execute(text("DELETE FROM agents WHERE agent_type NOT IN ('CONCIERGE', 'BOOKING', 'AVAILABILITY', 'SUPPORT', 'ACTIVITIES', 'RESTAURANT', 'VOICE', 'HOSTEL_AI_AGENT')"))
+        await db.execute(text("DELETE FROM live_updates WHERE id != 'notice_default_1'"))
+        await db.execute(text("DELETE FROM restaurants WHERE id != 'rest_default_1'"))
         await db.flush()
         res_org = await db.execute(select(Organization).where(Organization.id == "org_azure_group"))
         org = res_org.scalar_one_or_none()
@@ -77,8 +79,8 @@ async def prepare_db():
                 status="ACTIVE"
             ))
 
-        res_notice = await db.execute(select(LiveUpdate).where(LiveUpdate.property_id == "prop_azure_palm_resort"))
-        if not res_notice.scalar_one_or_none():
+        res_notice = await db.execute(select(LiveUpdate).where(LiveUpdate.id == "notice_default_1"))
+        if not res_notice.scalars().first():
             db.add(LiveUpdate(
                 id="notice_default_1",
                 organization_id="org_azure_group",
@@ -90,8 +92,8 @@ async def prepare_db():
                 is_active=True
             ))
 
-        res_rest = await db.execute(select(Restaurant).where(Restaurant.property_id == "prop_azure_palm_resort"))
-        if not res_rest.scalar_one_or_none():
+        res_rest = await db.execute(select(Restaurant).where(Restaurant.id == "rest_default_1"))
+        if not res_rest.scalars().first():
             db.add(Restaurant(
                 id="rest_default_1",
                 organization_id="org_azure_group",

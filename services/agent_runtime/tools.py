@@ -404,7 +404,11 @@ class HospitalityToolRegistry:
     async def tool_get_live_hostel_data(self, args: Dict[str, Any], organization_id: str, property_id: str) -> Dict[str, Any]:
         data_type = args.get("data_type", "timings")
         async with self._session_scope() as session:
-            stmt = select(LiveUpdate).where(LiveUpdate.property_id == property_id, LiveUpdate.is_active == True)
+            stmt = select(LiveUpdate).where(
+                LiveUpdate.organization_id == organization_id,
+                LiveUpdate.property_id == property_id,
+                LiveUpdate.is_active == True
+            )
             res = await session.execute(stmt)
             updates = res.scalars().all()
             return {
@@ -432,15 +436,13 @@ class HospitalityToolRegistry:
             res = await session.execute(stmt)
             resident = res.scalars().first()
             if resident:
+                # Security control C8: Redact PII (phone, emergency_contact, fee_status) for anonymous guest queries
                 return {
                     "resident_id": resident.id,
                     "name": resident.name,
                     "room_number": resident.room_number,
                     "hostel_block": resident.block,
-                    "fee_status": resident.fee_status,
-                    "check_in_date": resident.check_in_date,
-                    "phone": resident.phone,
-                    "emergency_contact": resident.emergency_contact
+                    "check_in_date": resident.check_in_date
                 }
             return {
                 "status": "RESIDENT_NOT_FOUND",
@@ -488,6 +490,7 @@ class HospitalityToolRegistry:
         async with self._session_scope() as session:
             stmt = select(SupportTicket).where(
                 SupportTicket.id == ticket_id,
+                SupportTicket.organization_id == organization_id,
                 SupportTicket.property_id == property_id
             )
             res = await session.execute(stmt)
@@ -512,6 +515,7 @@ class HospitalityToolRegistry:
     async def tool_get_notices(self, args: Dict[str, Any], organization_id: str, property_id: str) -> Dict[str, Any]:
         async with self._session_scope() as session:
             stmt = select(LiveUpdate).where(
+                LiveUpdate.organization_id == organization_id,
                 LiveUpdate.property_id == property_id,
                 LiveUpdate.is_active == True
             )
@@ -535,7 +539,10 @@ class HospitalityToolRegistry:
 
     async def tool_get_food_menu(self, args: Dict[str, Any], organization_id: str, property_id: str) -> Dict[str, Any]:
         async with self._session_scope() as session:
-            stmt = select(Restaurant).where(Restaurant.property_id == property_id)
+            stmt = select(Restaurant).where(
+                Restaurant.organization_id == organization_id,
+                Restaurant.property_id == property_id
+            )
             res = await session.execute(stmt)
             rests = res.scalars().all()
             menu_info = {}
@@ -595,7 +602,10 @@ class HospitalityToolRegistry:
 
     async def tool_get_property_details(self, args: Dict[str, Any], organization_id: str, property_id: str) -> Dict[str, Any]:
         async with self._session_scope() as session:
-            stmt = select(Property).where(Property.id == property_id)
+            stmt = select(Property).where(
+                Property.id == property_id,
+                Property.organization_id == organization_id
+            )
             res = await session.execute(stmt)
             prop = res.scalar_one_or_none()
             if prop:
@@ -616,7 +626,10 @@ class HospitalityToolRegistry:
     async def tool_get_room_details(self, args: Dict[str, Any], organization_id: str, property_id: str) -> Dict[str, Any]:
         room_type = args.get("room_type", "")
         async with self._session_scope() as session:
-            stmt = select(Room).where(Room.property_id == property_id)
+            stmt = select(Room).where(
+                Room.organization_id == organization_id,
+                Room.property_id == property_id
+            )
             if room_type:
                 stmt = stmt.where(Room.room_type.ilike(f"%{room_type}%"))
             res = await session.execute(stmt)
@@ -646,13 +659,18 @@ class HospitalityToolRegistry:
             check_out_str = (today + timedelta(days=1)).isoformat()
 
         async with self._session_scope() as session:
-            stmt = select(Room).where(Room.property_id == property_id, Room.is_available == True)
+            stmt = select(Room).where(
+                Room.organization_id == organization_id,
+                Room.property_id == property_id,
+                Room.is_available == True
+            )
             if room_type:
                 stmt = stmt.where(Room.room_type.ilike(f"%{room_type}%"))
             res = await session.execute(stmt)
             all_rooms = res.scalars().all()
 
             stmt_res = select(Reservation).where(
+                Reservation.organization_id == organization_id,
                 Reservation.property_id == property_id,
                 Reservation.status.in_(["CONFIRMED", "MODIFIED"])
             )
@@ -687,7 +705,10 @@ class HospitalityToolRegistry:
     async def tool_get_current_room_price(self, args: Dict[str, Any], organization_id: str, property_id: str) -> Dict[str, Any]:
         room_type = args.get("room_type", "")
         async with self._session_scope() as session:
-            stmt = select(Room).where(Room.property_id == property_id)
+            stmt = select(Room).where(
+                Room.organization_id == organization_id,
+                Room.property_id == property_id
+            )
             if room_type:
                 stmt = stmt.where(Room.room_type.ilike(f"%{room_type}%"))
             res = await session.execute(stmt)
@@ -722,7 +743,11 @@ class HospitalityToolRegistry:
         num_nights = (d_out - d_in).days
 
         async with self._session_scope() as session:
-            stmt_rooms = select(Room).where(Room.property_id == property_id, Room.is_available == True)
+            stmt_rooms = select(Room).where(
+                Room.organization_id == organization_id,
+                Room.property_id == property_id,
+                Room.is_available == True
+            )
             if room_type:
                 stmt_rooms = stmt_rooms.where(Room.room_type.ilike(f"%{room_type}%"))
             res_rooms = await session.execute(stmt_rooms)
@@ -732,6 +757,7 @@ class HospitalityToolRegistry:
                 return {"success": False, "status": "NO_VACANCY", "error": f"No rooms of type '{room_type}' available"}
 
             stmt_conflicts = select(Reservation).where(
+                Reservation.organization_id == organization_id,
                 Reservation.property_id == property_id,
                 Reservation.status.in_(["CONFIRMED", "MODIFIED"])
             )
@@ -749,6 +775,7 @@ class HospitalityToolRegistry:
                 return {"success": False, "status": "NO_VACANCY", "error": "No rooms available for requested dates"}
 
             stmt_rate = select(RatePlan).where(
+                RatePlan.organization_id == organization_id,
                 RatePlan.property_id == property_id,
                 RatePlan.room_type.ilike(f"%{assigned_room.room_type}%"),
                 RatePlan.is_active == True
@@ -795,7 +822,11 @@ class HospitalityToolRegistry:
         if not booking_id:
             return {"success": False, "error": "booking_id is required"}
         async with self._session_scope() as session:
-            stmt = select(Reservation).where(Reservation.id == booking_id, Reservation.property_id == property_id)
+            stmt = select(Reservation).where(
+                Reservation.id == booking_id,
+                Reservation.organization_id == organization_id,
+                Reservation.property_id == property_id
+            )
             res = await session.execute(stmt)
             res_item = res.scalar_one_or_none()
             if not res_item:
@@ -815,7 +846,11 @@ class HospitalityToolRegistry:
                 return {"success": False, "error": "Invalid date format"}
 
             num_nights = (d_out - d_in).days
-            room_stmt = select(Room).where(Room.id == res_item.room_id)
+            room_stmt = select(Room).where(
+                Room.id == res_item.room_id,
+                Room.organization_id == organization_id,
+                Room.property_id == property_id
+            )
             room_res = await session.execute(room_stmt)
             assigned_room = room_res.scalar_one_or_none()
             rate = assigned_room.price_per_night if assigned_room else 100.0
@@ -839,7 +874,11 @@ class HospitalityToolRegistry:
         if not booking_id:
             return {"success": False, "error": "booking_id is required"}
         async with self._session_scope() as session:
-            stmt = select(Reservation).where(Reservation.id == booking_id, Reservation.property_id == property_id)
+            stmt = select(Reservation).where(
+                Reservation.id == booking_id,
+                Reservation.organization_id == organization_id,
+                Reservation.property_id == property_id
+            )
             res = await session.execute(stmt)
             res_item = res.scalar_one_or_none()
             if not res_item:
@@ -858,7 +897,10 @@ class HospitalityToolRegistry:
     async def tool_get_facility_status(self, args: Dict[str, Any], organization_id: str, property_id: str) -> Dict[str, Any]:
         facility_name = args.get("facility_name", "")
         async with self._session_scope() as session:
-            stmt = select(Facility).where(Facility.property_id == property_id)
+            stmt = select(Facility).where(
+                Facility.organization_id == organization_id,
+                Facility.property_id == property_id
+            )
             if facility_name:
                 stmt = stmt.where(Facility.name.ilike(f"%{facility_name}%"))
             res = await session.execute(stmt)
@@ -875,7 +917,10 @@ class HospitalityToolRegistry:
 
     async def tool_get_today_activities(self, args: Dict[str, Any], organization_id: str, property_id: str) -> Dict[str, Any]:
         async with self._session_scope() as session:
-            stmt = select(Activity).where(Activity.property_id == property_id)
+            stmt = select(Activity).where(
+                Activity.organization_id == organization_id,
+                Activity.property_id == property_id
+            )
             res = await session.execute(stmt)
             acts = res.scalars().all()
             act_list = [
@@ -893,7 +938,10 @@ class HospitalityToolRegistry:
 
     async def tool_get_restaurant_status(self, args: Dict[str, Any], organization_id: str, property_id: str) -> Dict[str, Any]:
         async with self._session_scope() as session:
-            stmt = select(Restaurant).where(Restaurant.property_id == property_id)
+            stmt = select(Restaurant).where(
+                Restaurant.organization_id == organization_id,
+                Restaurant.property_id == property_id
+            )
             res = await session.execute(stmt)
             rests = res.scalars().all()
             return {
@@ -915,7 +963,11 @@ class HospitalityToolRegistry:
 
     async def tool_get_current_property_updates(self, args: Dict[str, Any], organization_id: str, property_id: str) -> Dict[str, Any]:
         async with self._session_scope() as session:
-            stmt = select(LiveUpdate).where(LiveUpdate.property_id == property_id, LiveUpdate.is_active == True)
+            stmt = select(LiveUpdate).where(
+                LiveUpdate.organization_id == organization_id,
+                LiveUpdate.property_id == property_id,
+                LiveUpdate.is_active == True
+            )
             res = await session.execute(stmt)
             upds = res.scalars().all()
             updates_list = [
@@ -933,7 +985,10 @@ class HospitalityToolRegistry:
     async def tool_get_weather(self, args: Dict[str, Any], organization_id: str, property_id: str) -> Dict[str, Any]:
         import httpx
         async with self._session_scope() as session:
-            stmt = select(Property).where(Property.id == property_id)
+            stmt = select(Property).where(
+                Property.id == property_id,
+                Property.organization_id == organization_id
+            )
             res = await session.execute(stmt)
             prop = res.scalar_one_or_none()
             loc = prop.address if prop and prop.address else None

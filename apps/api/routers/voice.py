@@ -15,8 +15,9 @@ from services.security.limiter import limiter
 from services.operations.feature_flags import feature_flags
 from services.resilience.tenant_limiter import enforce_tenant_fair_use_quota
 from services.integrations.voice_pipeline import voice_pipeline
-from services.database.session import get_db
-from services.database.models import VoiceSession
+from services.database.session import get_db, set_tenant_context
+from services.database.models import VoiceSession, Agent, AgentStatus
+from sqlalchemy import select
 
 router = APIRouter(prefix="/api/v1/voice", tags=["Data Plane - Voice Gateway"])
 
@@ -29,11 +30,11 @@ class TTSRequest(BaseModel):
 
 class VoiceSessionIngestRequest(BaseModel):
     conversation_id: str
-    organization_id: str
-    property_id: str
     agent_id: str
     duration_seconds: int
     raw_transcript: str
+    organization_id: Optional[str] = None
+    property_id: Optional[str] = None
     consent_acknowledged: bool = True
 
 def generate_synthetic_wav_audio(duration_sec=1.5, sample_rate=16000, freq=440.0) -> str:
@@ -135,7 +136,27 @@ async def record_voice_session(
     req: VoiceSessionIngestRequest,
     db: AsyncSession = Depends(get_db)
 ):
-    if feature_flags.is_kill_switch_active("kill_switch_voice") or not feature_flags.is_enabled("voice", org_id=req.organization_id):
+    # Security Control (C8): Lookup agent and derive tenant/property server-side
+    agent_stmt = select(Agent).where(Agent.id == req.agent_id)
+    agent_res = await db.execute(agent_stmt)
+    agent = agent_res.scalar_one_or_none()
+    if not agent:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Agent '{req.agent_id}' not found."
+        )
+    if agent.status != AgentStatus.ACTIVE:
+        status_val = agent.status.value if hasattr(agent.status, "value") else str(agent.status)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Agent '{req.agent_id}' is not active (status: {status_val})."
+        )
+
+    effective_org_id = agent.organization_id
+    effective_prop_id = agent.property_id
+    await set_tenant_context(db, effective_org_id)
+
+    if feature_flags.is_kill_switch_active("kill_switch_voice") or not feature_flags.is_enabled("voice", org_id=effective_org_id):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="FEATURE_DISABLED: Voice subsystem is disabled or kill switch engaged."
@@ -154,14 +175,14 @@ async def record_voice_session(
     # 3. Calculate telephony cost and billable minutes
     cost_usd, billable_mins = voice_pipeline.calculate_voice_session_cost(req.duration_seconds)
 
-    # 4. Save VoiceSession to DB
+    # 4. Save VoiceSession to DB strictly bounded by derived tenant & property
     session_id = str(uuid.uuid4())
     v_session = VoiceSession(
         id=session_id,
         conversation_id=req.conversation_id,
-        organization_id=req.organization_id,
-        property_id=req.property_id,
-        agent_id=req.agent_id,
+        organization_id=effective_org_id,
+        property_id=effective_prop_id,
+        agent_id=agent.id,
         duration_seconds=req.duration_seconds,
         cost=cost_usd,
         status="COMPLETED"
