@@ -78,7 +78,7 @@ jobs:
         run: ruff check .
 
       - name: Run Mypy Static Type Checking
-        run: mypy apps services --ignore-missing-imports || true
+        run: mypy apps services --ignore-missing-imports
 
       - name: Set up Node.js 20
         uses: actions/setup-node@v4
@@ -142,17 +142,29 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run Alembic Migrations & Verify Zero Drift
+      - name: Run Alembic Migrations as Owner Role & Verify Zero Drift
         env:
           DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/test_hospitality_agent_cloud"
         run: |
           alembic upgrade head
           alembic check
 
-      - name: Run Pytest Regression Test Suite
+      - name: Provision Non-Owner, Non-Superuser App User (Enforces RLS)
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d test_hospitality_agent_cloud -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'app_user') THEN CREATE ROLE app_user WITH LOGIN PASSWORD 'test_app_pw' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS; END IF; END \$\$;"
+          psql -h localhost -U postgres -d test_hospitality_agent_cloud -c "GRANT CONNECT ON DATABASE test_hospitality_agent_cloud TO app_user;"
+          psql -h localhost -U postgres -d test_hospitality_agent_cloud -c "GRANT USAGE ON SCHEMA public TO app_user;"
+          psql -h localhost -U postgres -d test_hospitality_agent_cloud -c "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO app_user;"
+          psql -h localhost -U postgres -d test_hospitality_agent_cloud -c "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO app_user;"
+          psql -h localhost -U postgres -d test_hospitality_agent_cloud -c "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app_user;"
+          psql -h localhost -U postgres -d test_hospitality_agent_cloud -c "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO app_user;"
+
+      - name: Run Pytest Regression Test Suite as App User (RLS Active)
         env:
           ENVIRONMENT: "testing"
-          DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/test_hospitality_agent_cloud"
+          DATABASE_URL: "postgresql+asyncpg://app_user:test_app_pw@localhost:5432/test_hospitality_agent_cloud"
           REDIS_URL: "redis://localhost:6379/0"
           SECRET_KEY: "ci-secret-key-for-testing-purposes-only-32bytes"
           JWT_SECRET_KEY: "ci-secret-key-for-testing-purposes-only-32bytes"

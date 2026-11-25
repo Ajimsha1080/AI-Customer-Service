@@ -60,12 +60,14 @@ async def async_sync_integration(payload: Dict[str, Any]) -> Dict[str, Any]:
     org_id = payload.get("organization_id")
     logger.info(f"[TaskWorker] Running integration sync for source_id={source_id} org={org_id}")
 
-    from services.database.session import AsyncSessionLocal
+    from services.database.session import AsyncSessionLocal, set_tenant_context
     from services.database.models import IntegrationSource
     from sqlalchemy import select
     import httpx
 
     async with AsyncSessionLocal() as session:
+        if org_id:
+            await set_tenant_context(session, org_id)
         stmt = select(IntegrationSource).where(IntegrationSource.id == source_id)
         res = await session.execute(stmt)
         source = res.scalar_one_or_none()
@@ -115,11 +117,13 @@ async def async_rollup_usage_events(payload: Dict[str, Any]) -> Dict[str, Any]:
     org_id = payload.get("organization_id")
     logger.info(f"[TaskWorker] Aggregating usage rollup for organization={org_id}")
 
-    from services.database.session import AsyncSessionLocal
+    from services.database.session import AsyncSessionLocal, set_tenant_context
     from services.database.models import UsageEvent
     from sqlalchemy import select, func
 
     async with AsyncSessionLocal() as session:
+        if org_id:
+            await set_tenant_context(session, org_id)
         query = select(
             func.count(UsageEvent.id),
             func.sum(UsageEvent.quantity),

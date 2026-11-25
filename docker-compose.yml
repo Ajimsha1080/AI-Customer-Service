@@ -13,6 +13,7 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./infra/docker/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
@@ -40,7 +41,8 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/hospitality_agent_cloud
+      - DATABASE_URL=postgresql+asyncpg://app_user:app_secure_password@postgres:5432/hospitality_agent_cloud
+      - MIGRATION_DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/hospitality_agent_cloud
       - REDIS_URL=redis://redis:6379/0
       - SARVAM_API_KEY=${SARVAM_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
@@ -58,7 +60,8 @@ services:
     restart: always
     command: ["python", "-m", "services.tasks.worker"]
     environment:
-      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/hospitality_agent_cloud
+      - DATABASE_URL=postgresql+asyncpg://app_user:app_secure_password@postgres:5432/hospitality_agent_cloud
+      - MIGRATION_DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/hospitality_agent_cloud
       - REDIS_URL=redis://redis:6379/0
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
     depends_on:

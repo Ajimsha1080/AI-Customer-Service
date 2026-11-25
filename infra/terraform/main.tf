@@ -169,8 +169,20 @@ resource "aws_secretsmanager_secret" "app_secrets" {
   recovery_window_in_days = 0
 }
 
+# Dedicated app_user credentials (NOSUPERUSER, NOBYPASSRLS)
 resource "aws_secretsmanager_secret_version" "db_url" {
   secret_id     = aws_secretsmanager_secret.app_secrets.id
+  secret_string = "postgresql+asyncpg://app_user:${var.db_password}@${aws_db_instance.postgres.endpoint}/${aws_db_instance.postgres.db_name}"
+}
+
+resource "aws_secretsmanager_secret" "migration_secrets" {
+  name                    = "/hospitality-agent-cloud/${var.environment}/MIGRATION_DATABASE_URL"
+  recovery_window_in_days = 0
+}
+
+# Owner credentials for Alembic migrations
+resource "aws_secretsmanager_secret_version" "migration_db_url" {
+  secret_id     = aws_secretsmanager_secret.migration_secrets.id
   secret_string = "postgresql+asyncpg://postgres:${var.db_password}@${aws_db_instance.postgres.endpoint}/${aws_db_instance.postgres.db_name}"
 }
 

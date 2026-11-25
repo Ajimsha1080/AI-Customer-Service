@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from jose import jwt, JWTError
 
 from apps.api.config import settings
-from services.database.session import get_db
+from services.database.session import get_db, set_tenant_context
 from services.database.models import User, Organization, UserRole, SSOConfig
 from services.database.audit import record_audit_log_async
 from apps.api.auth import (
@@ -281,6 +281,9 @@ async def saml_sso_callback(
     org_id = state_data.get("org_id")
     expected_in_response_to = state_data.get("in_response_to")
 
+    if org_id:
+        await set_tenant_context(db, org_id)
+
     stmt = select(SSOConfig).where(SSOConfig.organization_id == org_id)
     res = await db.execute(stmt)
     config = res.scalar_one_or_none()
@@ -430,6 +433,9 @@ async def oidc_sso_callback(
     """Handles OIDC callback with PKCE, nonce, and ID-token signature validation."""
     state_data = decode_sso_state(req.state)
     org_id = state_data.get("org_id")
+
+    if org_id:
+        await set_tenant_context(db, org_id)
     expected_nonce = state_data.get("nonce")
 
     stmt = select(SSOConfig).where(SSOConfig.organization_id == org_id)

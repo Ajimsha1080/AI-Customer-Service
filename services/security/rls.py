@@ -24,7 +24,21 @@ RLS_TABLES: List[str] = [
     "data_access_policies",
     "audit_logs",
     "invitations",
-    "usage_events"
+    "usage_events",
+    "agents",
+    "agent_configs",
+    "properties",
+    "users",
+    "subscriptions",
+    "user_sessions",
+    "custom_roles",
+    "api_keys",
+    "webhook_subscriptions",
+    "webhook_delivery_logs",
+    "voice_sessions",
+    "sso_configs",
+    "scim_tokens",
+    "whatsapp_channel_mappings"
 ]
 
 def generate_rls_sql() -> str:
@@ -37,7 +51,7 @@ def generate_rls_sql() -> str:
         # Drop existing policy if any
         ddl_statements.append(f"DROP POLICY IF EXISTS tenant_isolation_policy ON {tbl};")
         
-        # document_chunks and messages join to parent or filter if organization_id exists
+        # document_chunks, messages, and agent_configs join to parent or filter if organization_id exists
         if tbl == "document_chunks":
             policy_sql = f"""
             CREATE POLICY tenant_isolation_policy ON {tbl}
@@ -68,6 +82,23 @@ def generate_rls_sql() -> str:
             WITH CHECK (
                 conversation_id IN (
                     SELECT id FROM conversations 
+                    WHERE organization_id = NULLIF(current_setting('app.current_tenant_id', true), '')
+                )
+            );
+            """
+        elif tbl == "agent_configs":
+            policy_sql = f"""
+            CREATE POLICY tenant_isolation_policy ON {tbl}
+            FOR ALL
+            USING (
+                agent_id IN (
+                    SELECT id FROM agents 
+                    WHERE organization_id = NULLIF(current_setting('app.current_tenant_id', true), '')
+                )
+            )
+            WITH CHECK (
+                agent_id IN (
+                    SELECT id FROM agents 
                     WHERE organization_id = NULLIF(current_setting('app.current_tenant_id', true), '')
                 )
             );

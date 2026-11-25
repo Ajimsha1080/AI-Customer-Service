@@ -14,7 +14,7 @@ import uuid
 import hashlib
 from apps.api.config import settings
 from services.database.session import get_db, set_tenant_context
-from services.database.models import User, UserRole, RevokedToken, Organization, CustomRole, UserSession
+from services.database.models import User, UserRole, RevokedToken, Organization, CustomRole, UserSession, ApiKey
 
 pwd_context = CryptContext(schemes=["argon2"], deprecated="auto")
 security_scheme = HTTPBearer(auto_error=False)
@@ -365,6 +365,31 @@ async def get_current_user(
     db: AsyncSession = Depends(get_db)
 ) -> User:
     """FastAPI dependency: verifies Bearer JWT token, active status, session revocation, IP allowlist, and support impersonation."""
+    # Check X-API-Key header authentication path
+    api_key_header = (request.headers.get("x-api-key") or request.headers.get("X-API-Key")) if request else None
+    if api_key_header:
+        key_hash = hashlib.sha256(api_key_header.strip().encode("utf-8")).hexdigest()
+        stmt_key = select(ApiKey).where(ApiKey.key_hash == key_hash, ApiKey.is_active == True)
+        res_key = await db.execute(stmt_key)
+        api_key_row = res_key.scalar_one_or_none()
+        if not api_key_row:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API key.")
+        now = datetime.now(timezone.utc)
+        if api_key_row.expires_at:
+            exp = api_key_row.expires_at.replace(tzinfo=timezone.utc) if api_key_row.expires_at.tzinfo is None else api_key_row.expires_at
+            if now > exp:
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="API key has expired.")
+        # Enterprise RLS session binding for API key
+        await set_tenant_context(db, api_key_row.organization_id)
+        return User(
+            id=f"api_key_{api_key_row.id}",
+            organization_id=api_key_row.organization_id,
+            email=f"{api_key_row.key_prefix}@apikey.tenant",
+            full_name=api_key_row.name,
+            role=UserRole.ADMIN,
+            is_active=True
+        )
+
     if not credentials or not credentials.credentials:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

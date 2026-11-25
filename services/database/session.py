@@ -85,7 +85,7 @@ async def set_tenant_context(session: AsyncSession, tenant_id: str) -> None:
     bind = getattr(session, "bind", None)
     url_str = str(bind.url) if bind and hasattr(bind, "url") else settings.DATABASE_URL
     if "postgresql" in url_str:
-        await session.execute(text("SET LOCAL app.current_tenant_id = :tenant_id"), {"tenant_id": tenant_id})
+        await session.execute(text("SELECT set_config('app.current_tenant_id', :tenant_id, true)"), {"tenant_id": tenant_id})
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     """Primary Write Database Dependency."""
