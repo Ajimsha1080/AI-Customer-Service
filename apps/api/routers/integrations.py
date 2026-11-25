@@ -34,9 +34,9 @@ def extract_text_from_file_bytes(filename: str, content_bytes: bytes) -> str:
 from services.database.session import get_db
 from services.database.models import (
     User, KnowledgeDocument, LiveUpdate, IntegrationSource, DataAccessPolicy,
-    AuditLog, Agent, AgentStatus, AgentConfig, Organization
+    AuditLog, Agent, AgentStatus, AgentConfig, Organization, UserSession
 )
-from apps.api.auth import get_current_user, verify_tenant_access
+from apps.api.auth import get_current_user, verify_tenant_access, _hash_token, decode_guest_session_token
 from services.billing.metering import SaaSMeteringService
 from services.rag.vector_store import RAGVectorService
 import asyncio
@@ -50,7 +50,7 @@ from services.resilience.circuit_breaker import get_circuit_breaker, CircuitBrea
 from services.operations.feature_flags import feature_flags
 from services.resilience.tenant_limiter import enforce_tenant_fair_use_quota
 from services.database.pagination import paginate_query
-from services.realtime.broadcaster import realtime_hub, generate_realtime_ticket, verify_realtime_ticket
+from services.realtime.broadcaster import realtime_hub, generate_realtime_ticket, verify_realtime_ticket, verify_realtime_ticket_async
 from apps.api.auth import decode_access_token
 from fastapi import WebSocket, WebSocketDisconnect, Response
 
@@ -316,61 +316,146 @@ async def live_updates_events_stream(
     request: Request,
     organization_id: Optional[str] = Query(None),
     property_id: Optional[str] = Query(None),
-    ticket: Optional[str] = Query(None)
+    ticket: Optional[str] = Query(None),
+    guest_token: Optional[str] = Query(None),
+    conversation_id: Optional[str] = Query(None),
+    max_events: Optional[int] = Query(None),
+    db: AsyncSession = Depends(get_db)
 ):
     """Server-Sent Events stream for live property updates and announcements.
-    Supports 60s ticket authentication, httpOnly session cookies, Bearer tokens, or public guest mode.
-    Includes Last-Event-ID replay, 15s heartbeats, and bounded queues.
+    
+    Security Controls (C6):
+    - Unauthenticated calls requesting organization_id without valid credentials are strictly rejected (401).
+    - Staff streams require an org-bound auth ticket, active session cookie, or Bearer token.
+    - Realtime tickets are single-use (jti tracked in Redis).
+    - User must be active (is_active=True) and session not revoked (is_revoked=False).
+    - Guests receive ONLY their per-conversation channel (conv:<id>) authorized by signed guest token.
     """
     from fastapi.responses import StreamingResponse
-    resolved_org = organization_id
+
+    # 1. GUEST CHANNEL PATH
+    if guest_token:
+        try:
+            gdata = decode_guest_session_token(guest_token)
+        except Exception:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid guest session token.")
+        
+        token_conv_id = gdata.get("conv_id")
+        if conversation_id and conversation_id != token_conv_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Guest session token does not match requested conversation.")
+        
+        # Guest receives strictly their own conversation channel
+        channels = [f"conv:{token_conv_id}"]
+        last_event_id = request.headers.get("last-event-id") or request.query_params.get("last_event_id")
+
+        async def guest_event_generator():
+            q, missed_events = await realtime_hub.subscribe(channels, last_event_id=last_event_id)
+            try:
+                init_payload = {"type": "CONNECTED", "status": "ONLINE", "channels": channels, "timestamp": str(time.time())}
+                yield f"data: {json.dumps(init_payload)}\n\n"
+                if max_events and max_events <= 1:
+                    return
+                for evt in missed_events:
+                    yield f"id: {evt['id']}\nevent: {evt['type']}\ndata: {json.dumps(evt)}\n\n"
+                while True:
+                    if await request.is_disconnected():
+                        break
+                    try:
+                        evt = await asyncio.wait_for(q.get(), timeout=1.0)
+                        yield f"id: {evt['id']}\nevent: {evt['type']}\ndata: {json.dumps(evt)}\n\n"
+                    except asyncio.TimeoutError:
+                        yield ": ping\n\n"
+            except asyncio.CancelledError:
+                pass
+            finally:
+                realtime_hub.unsubscribe(q)
+
+        return StreamingResponse(
+            guest_event_generator(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"}
+        )
+
+    # 2. STAFF / ADMIN TENANT STREAM PATH
+    authenticated_user_id = None
+    caller_org_id = None
+    caller_role = None
+
     if ticket:
-        tdata = verify_realtime_ticket(ticket)
-        if tdata:
-            resolved_org = tdata.get("org_id") or resolved_org
+        tdata = await verify_realtime_ticket_async(ticket)
+        if not tdata:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired realtime ticket.")
+        authenticated_user_id = tdata.get("sub")
+        caller_org_id = tdata.get("org_id")
+        caller_role = tdata.get("role")
+    else:
+        cookie_token = request.cookies.get("session_token") or request.cookies.get("access_token")
+        auth_hdr = request.headers.get("authorization") or ""
+        token_to_check = cookie_token or (auth_hdr.split(" ")[1] if auth_hdr.startswith("Bearer ") else None)
 
-    cookie_token = request.cookies.get("session_token") or request.cookies.get("access_token")
-    auth_hdr = request.headers.get("authorization") or ""
-    token_to_check = cookie_token or (auth_hdr.split(" ")[1] if auth_hdr.startswith("Bearer ") else None)
+        if not token_to_check:
+            # Unauthenticated attempt to stream tenant events
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required to stream live updates (valid ticket, session cookie, or Bearer token)."
+            )
 
-    if token_to_check:
         try:
             payload = decode_access_token(token_to_check)
-            caller_org = payload.get("org_id")
+            authenticated_user_id = payload.get("sub")
+            caller_org_id = payload.get("org_id")
             caller_role = payload.get("role")
-            if caller_role != "SUPER_ADMIN" and resolved_org and caller_org != resolved_org:
-                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied to tenant realtime stream.")
-            resolved_org = resolved_org or caller_org
         except HTTPException:
             raise
         except Exception:
-            pass
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid access token credentials.")
 
-    channels = []
-    if resolved_org:
-        channels.append(f"org:{resolved_org}")
-        if property_id:
-            channels.append(f"org:{resolved_org}:prop:{property_id}")
+        # Check session revocation
+        token_hash = _hash_token(token_to_check)
+        stmt_sess = select(UserSession).where(UserSession.session_token_hash == token_hash)
+        res_sess = await db.execute(stmt_sess)
+        user_sess = res_sess.scalar_one_or_none()
+        if user_sess and user_sess.is_revoked:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session has been revoked.")
+
+    # Check user is active in DB
+    stmt_u = select(User).where(User.id == authenticated_user_id)
+    res_u = await db.execute(stmt_u)
+    user = res_u.scalar_one_or_none()
+    if not user or not user.is_active:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User account is deactivated or not found.")
+
+    # Enforce tenant isolation
+    resolved_org = caller_org_id
+    if caller_role != "SUPER_ADMIN":
+        if organization_id and organization_id != caller_org_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied to tenant realtime stream.")
     else:
-        channels.append("general")
+        resolved_org = organization_id or caller_org_id
+
+    if not resolved_org:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Tenant organization must be specified.")
+
+    channels = [f"org:{resolved_org}"]
+    if property_id:
+        channels.append(f"org:{resolved_org}:prop:{property_id}")
 
     last_event_id = request.headers.get("last-event-id") or request.query_params.get("last_event_id")
 
     async def event_generator():
         q, missed_events = await realtime_hub.subscribe(channels, last_event_id=last_event_id)
         try:
-            # Yield initial handshake
             init_payload = {"type": "CONNECTED", "status": "ONLINE", "channels": channels, "timestamp": str(time.time())}
             yield f"data: {json.dumps(init_payload)}\n\n"
-
-            # Replay missed events
+            if max_events and max_events <= 1:
+                return
             for evt in missed_events:
                 yield f"id: {evt['id']}\nevent: {evt['type']}\ndata: {json.dumps(evt)}\n\n"
-
-            # Stream live events with 15s heartbeats
             while True:
+                if await request.is_disconnected():
+                    break
                 try:
-                    evt = await asyncio.wait_for(q.get(), timeout=15.0)
+                    evt = await asyncio.wait_for(q.get(), timeout=1.0)
                     yield f"id: {evt['id']}\nevent: {evt['type']}\ndata: {json.dumps(evt)}\n\n"
                 except asyncio.TimeoutError:
                     yield ": ping\n\n"
@@ -382,11 +467,7 @@ async def live_updates_events_stream(
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no"
-        }
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"}
     )
 
 @router.post("/api/v1/realtime/ticket", tags=["Realtime Infrastructure"])

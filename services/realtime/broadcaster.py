@@ -308,6 +308,7 @@ live_broadcaster = realtime_hub
 
 # --- 60-SECOND REAL-TIME ONE-TIME TICKET AUTHENTICATION ---
 TICKET_ACTION = "realtime_stream_auth"
+_DEV_TEST_USED_REALTIME_TICKETS = set()
 
 def generate_realtime_ticket(user_id: str, organization_id: str, role: str) -> str:
     """Generates a 60-second HMAC-signed single-use ticket for EventSource / WebSocket auth."""
@@ -315,18 +316,54 @@ def generate_realtime_ticket(user_id: str, organization_id: str, role: str) -> s
         "sub": user_id,
         "org_id": organization_id,
         "role": role,
+        "token_type": "realtime_ticket",
+        "aud": "realtime_ticket",
         "action": TICKET_ACTION,
         "jti": str(uuid.uuid4()),
-        "exp": int(time.time()) + 60
+        "exp": int(time.time()) + 60,
+        "iat": int(time.time())
     }
     return jwt.encode(payload, settings.SECRET_KEY, algorithm="HS256")
 
-def verify_realtime_ticket(ticket: str) -> Optional[Dict[str, Any]]:
-    """Validates 60-second realtime ticket signature and expiry."""
+async def verify_realtime_ticket_async(ticket: str) -> Optional[Dict[str, Any]]:
+    """Validates 60-second realtime ticket signature, expiry, and enforces single-use via Redis."""
     if not ticket:
         return None
     try:
-        payload = jwt.decode(ticket, settings.SECRET_KEY, algorithms=["HS256"])
+        payload = jwt.decode(ticket, settings.SECRET_KEY, algorithms=["HS256"], options={"verify_aud": False})
+        if payload.get("action") != TICKET_ACTION:
+            return None
+        jti = payload.get("jti")
+        if not jti:
+            return None
+
+        # Enforce single-use via Redis
+        import redis.asyncio as aioredis
+        try:
+            r = aioredis.from_url(settings.REDIS_URL, socket_connect_timeout=0.3)
+            ok = await r.set(f"realtime_ticket:{jti}", "1", nx=True, ex=60)
+            await r.aclose()
+            if not ok:
+                logger.warning(f"Realtime ticket replay detected for jti {jti}")
+                return None
+        except Exception:
+            if settings.is_production:
+                logger.error("Redis unavailable for realtime ticket verification in production.")
+                return None
+            if jti in _DEV_TEST_USED_REALTIME_TICKETS:
+                return None
+            _DEV_TEST_USED_REALTIME_TICKETS.add(jti)
+
+        return payload
+    except JWTError:
+        return None
+
+def verify_realtime_ticket(ticket: str) -> Optional[Dict[str, Any]]:
+    """Synchronous fallback validator for ticket format."""
+    if not ticket:
+        return None
+    try:
+        payload = jwt.decode(ticket, settings.SECRET_KEY, algorithms=["HS256"], options={"verify_aud": False})
         if payload.get("action") != TICKET_ACTION:
             return None
         return payload

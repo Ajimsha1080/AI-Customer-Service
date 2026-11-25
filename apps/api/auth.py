@@ -83,6 +83,48 @@ def create_realtime_ticket_token(data: dict, expires_delta: Optional[timedelta] 
 def create_oauth_state_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
     return create_special_token("oauth_state", "oauth_state", data, expires_delta or timedelta(minutes=10))
 
+def create_guest_session_token(
+    conversation_id: str,
+    organization_id: str,
+    property_id: Optional[str] = None,
+    expires_in_hours: int = 24
+) -> str:
+    """Creates a cryptographically signed guest session token scoped strictly to one conversation."""
+    return create_special_token(
+        token_type="guest_session",
+        aud="guest_session",
+        data={
+            "sub": f"guest_{conversation_id}",
+            "conv_id": conversation_id,
+            "conversation_id": conversation_id,
+            "org_id": organization_id,
+            "property_id": property_id,
+            "role": "GUEST"
+        },
+        expires_delta=timedelta(hours=expires_in_hours)
+    )
+
+def decode_guest_session_token(token: str) -> dict:
+    """Decodes and validates a signed guest session token."""
+    try:
+        payload = jwt.decode(
+            token,
+            settings.JWT_SECRET_KEY,
+            algorithms=[settings.JWT_ALGORITHM],
+            options={"verify_aud": False}
+        )
+        if payload.get("token_type") != "guest_session" or payload.get("aud") != "guest_session":
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid guest session token."
+            )
+        return payload
+    except JWTError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate guest session token or token expired."
+        )
+
 import uuid
 import hashlib
 

@@ -11,49 +11,59 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.api.config import settings
 from services.database.session import get_db
-from services.database.models import User, Organization, Agent, IntegrationSource, UserRole
-from apps.api.auth import get_super_admin_user, decode_access_token
-from services.realtime.broadcaster import realtime_hub, verify_realtime_ticket
+from services.database.models import User, Organization, Agent, IntegrationSource, UserRole, UserSession
+from apps.api.auth import get_super_admin_user, decode_access_token, _hash_token
+from services.realtime.broadcaster import realtime_hub, verify_realtime_ticket, verify_realtime_ticket_async
 
 router = APIRouter(prefix="/api/v1/platform", tags=["Platform Super Admin Telemetry"])
 
-async def _verify_superadmin_sse(request: Request, ticket: Optional[str] = None) -> bool:
-    """Verifies caller is SUPER_ADMIN via 60s ticket, cookie, or Authorization header."""
+async def _verify_superadmin_sse(request: Request, ticket: Optional[str] = None, db: Optional[AsyncSession] = None) -> bool:
+    """Verifies caller is active SUPER_ADMIN with non-revoked session via single-use 60s ticket, cookie, or Bearer token."""
+    user_id = None
+    token_to_check = None
+
     if ticket:
-        ticket_data = verify_realtime_ticket(ticket)
+        ticket_data = await verify_realtime_ticket_async(ticket)
         if ticket_data and ticket_data.get("role") == UserRole.SUPER_ADMIN.value:
-            return True
-    
-    # Check cookies
-    cookie_token = request.cookies.get("session_token") or request.cookies.get("access_token")
-    if cookie_token:
-        try:
-            payload = decode_access_token(cookie_token)
-            if payload.get("role") == UserRole.SUPER_ADMIN.value:
-                return True
-        except Exception:
-            pass
+            user_id = ticket_data.get("sub")
+    else:
+        cookie_token = request.cookies.get("session_token") or request.cookies.get("access_token")
+        auth_hdr = request.headers.get("authorization") or ""
+        token_to_check = cookie_token or (auth_hdr.split(" ")[1] if auth_hdr.startswith("Bearer ") else None)
+        if token_to_check:
+            try:
+                payload = decode_access_token(token_to_check)
+                if payload.get("role") == UserRole.SUPER_ADMIN.value:
+                    user_id = payload.get("sub")
+            except Exception:
+                pass
 
-    # Check Authorization header
-    auth_hdr = request.headers.get("authorization") or ""
-    if auth_hdr.startswith("Bearer "):
-        tok = auth_hdr.split(" ")[1]
-        try:
-            payload = decode_access_token(tok)
-            if payload.get("role") == UserRole.SUPER_ADMIN.value:
-                return True
-        except Exception:
-            pass
+    if not user_id:
+        return False
 
-    return False
+    if db:
+        if token_to_check:
+            token_hash = _hash_token(token_to_check)
+            res_sess = await db.execute(select(UserSession).where(UserSession.session_token_hash == token_hash))
+            user_sess = res_sess.scalar_one_or_none()
+            if user_sess and user_sess.is_revoked:
+                return False
+
+        res_u = await db.execute(select(User).where(User.id == user_id))
+        user = res_u.scalar_one_or_none()
+        if not user or not user.is_active or user.role != UserRole.SUPER_ADMIN:
+            return False
+
+    return True
 
 @router.get("/events")
 async def platform_realtime_events_stream(
     request: Request,
-    ticket: Optional[str] = Query(None)
+    ticket: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_db)
 ):
     """Server-Sent Events (SSE) stream for Super Admin real-time platform telemetry with ticket/cookie auth and replay."""
-    is_authorized = await _verify_superadmin_sse(request, ticket)
+    is_authorized = await _verify_superadmin_sse(request, ticket, db=db)
     if not is_authorized:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -75,8 +85,10 @@ async def platform_realtime_events_stream(
 
             # Stream live events with 15s heartbeats
             while True:
+                if await request.is_disconnected():
+                    break
                 try:
-                    evt = await asyncio.wait_for(q.get(), timeout=15.0)
+                    evt = await asyncio.wait_for(q.get(), timeout=1.0)
                     yield f"id: {evt['id']}\nevent: {evt['type']}\ndata: {json.dumps(evt)}\n\n"
                 except asyncio.TimeoutError:
                     # Heartbeat to keep connection alive
