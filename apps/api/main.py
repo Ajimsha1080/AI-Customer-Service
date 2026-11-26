@@ -44,6 +44,9 @@ from services.realtime.broadcaster import realtime_hub
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if settings.is_production:
+        from services.security.secrets_service import validate_production_secrets
+        validate_production_secrets()
+
         from services.database.session import AsyncSessionLocal
         from sqlalchemy import text
         async with AsyncSessionLocal() as session:
