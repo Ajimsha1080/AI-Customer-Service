@@ -2,19 +2,36 @@ import os
 import json
 import uuid
 import time
+import random
+import hashlib
 import logging
 import asyncio
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, Optional
 
 from apps.api.config import settings
-
 from services.common.redis_service import get_redis_client
 
 logger = logging.getLogger("hospitality_agent_cloud.worker")
 QUEUE_KEY = "hac:task_queue"
-DLQ_KEY = "hac:dead_letter_queue"
+DLQ_KEY = "hac:task_queue:dlq"
 PROCESSED_SET_KEY = "hac:processed_jobs"
+DEDUP_PREFIX = "hac:task_dedup:"
+
+SOFT_TASK_TIMEOUT_SECONDS = 60.0
+HARD_TASK_TIMEOUT_SECONDS = 120.0
+DEFAULT_MAX_RETRIES = 5
+
+def calculate_backoff_with_jitter(attempt: int, base: float = 0.5, max_backoff: float = 60.0) -> float:
+    """Calculates exponential backoff with random full jitter to prevent thundering herd."""
+    exp = min(max_backoff, base * (2 ** (attempt - 1)))
+    jitter = random.uniform(0, 0.5 * exp)
+    return min(max_backoff, exp + jitter)
+
+def compute_task_content_hash(task_name: str, payload: Dict[str, Any]) -> str:
+    """Computes deterministic SHA-256 hash of task name and payload for content-based deduplication."""
+    serialized = json.dumps({"task_name": task_name, "payload": payload}, sort_keys=True, default=str)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 # --- ASYNC WORKER TASK DEFINITIONS ---
 
@@ -205,7 +222,7 @@ LOCAL_DLQ: Dict[str, Dict[str, Any]] = {}
 PROCESSED_JOB_KEYS: set = set()
 
 async def push_to_dlq(envelope: Dict[str, Any], error_reason: str):
-    """Pushes a permanently failed job to the Dead-Letter Queue in Redis."""
+    """Pushes a permanently failed job to the Dead-Letter Queue in Redis and fires alerts."""
     envelope["failed_at"] = datetime.now(timezone.utc).isoformat()
     envelope["error"] = error_reason
     envelope["status"] = "DEAD_LETTER"
@@ -222,6 +239,23 @@ async def push_to_dlq(envelope: Dict[str, Any], error_reason: str):
             raise RuntimeError(f"DLQ storage failure in production: {e}")
         LOCAL_DLQ[job_id] = envelope
         logger.error(f"[TaskWorker] Job '{job_id}' ({envelope.get('task_name')}) moved to Local DLQ fallback: {error_reason}")
+
+    # Alerting via webhook if configured
+    if settings.ALERT_WEBHOOK_URL:
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=2.0) as http_client:
+                await http_client.post(
+                    settings.ALERT_WEBHOOK_URL,
+                    json={
+                        "text": f"🚨 [DLQ Alert] Job '{job_id}' ({envelope.get('task_name')}) permanently failed: {error_reason}",
+                        "job_id": job_id,
+                        "task_name": envelope.get("task_name"),
+                        "timestamp": datetime.now(timezone.utc).isoformat()
+                    }
+                )
+        except Exception:
+            pass
 
 async def list_dlq_jobs(limit: int = 50) -> list[Dict[str, Any]]:
     """Inspects pending dead-letter jobs from Redis."""
@@ -261,22 +295,60 @@ async def replay_dlq_job(job_id: str) -> Optional[Dict[str, Any]]:
     # Reset retries and re-enqueue
     task_name = target_envelope.get("task_name")
     payload = target_envelope.get("payload", {})
-    new_task_id = await enqueue_task(task_name=task_name, payload=payload, max_retries=3)
+    new_task_id = await enqueue_task(task_name=task_name, payload=payload, max_retries=DEFAULT_MAX_RETRIES)
     logger.info(f"[TaskWorker] Replayed dead letter job '{job_id}' as new task '{new_task_id}'.")
     return {"replayed_job_id": job_id, "new_task_id": new_task_id, "task_name": task_name}
 
 # --- TASK ENQUEUEING ENGINE ---
 
-async def enqueue_task(task_name: str, payload: Dict[str, Any], max_retries: int = 3, idempotency_key: Optional[str] = None) -> str:
-    """Enqueues a task for asynchronous processing via Redis queue."""
+async def execute_task_with_timeout(
+    fn,
+    payload: Dict[str, Any],
+    soft_timeout: float = SOFT_TASK_TIMEOUT_SECONDS,
+    hard_timeout: float = HARD_TASK_TIMEOUT_SECONDS
+) -> Any:
+    """Executes a worker task with soft (warning) and hard (cancellation) timeouts."""
+    start_time = asyncio.get_running_loop().time()
+
+    async def _monitor_soft():
+        await asyncio.sleep(soft_timeout)
+        elapsed = asyncio.get_running_loop().time() - start_time
+        logger.warning(f"[TaskWorker] Task exceeded soft timeout of {soft_timeout}s (elapsed: {elapsed:.1f}s)")
+
+    monitor_task = asyncio.create_task(_monitor_soft())
+    try:
+        res = await asyncio.wait_for(fn(payload), timeout=hard_timeout)
+        return res
+    except asyncio.TimeoutError:
+        logger.error(f"[TaskWorker] Task exceeded hard timeout of {hard_timeout}s and was cancelled.")
+        raise TimeoutError(f"Task exceeded hard timeout of {hard_timeout}s")
+    finally:
+        monitor_task.cancel()
+
+async def enqueue_task(
+    task_name: str,
+    payload: Dict[str, Any],
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    idempotency_key: Optional[str] = None
+) -> str:
+    """Enqueues a task with content hash / ID deduplication in Redis and exponential backoff retry configuration."""
+    content_hash = compute_task_content_hash(task_name, payload)
     task_id = idempotency_key or f"task_{uuid.uuid4().hex[:12]}"
+    dedup_key = f"{DEDUP_PREFIX}{idempotency_key or content_hash}"
 
     client = None
     try:
         client = await get_redis_client()
+        existing_id = await client.get(dedup_key)
+        if existing_id:
+            logger.info(f"[TaskQueue] Duplicate task detected for key '{dedup_key}', returning existing task ID '{existing_id}'.")
+            return existing_id
+
         if await client.sismember(PROCESSED_SET_KEY, task_id):
-            logger.info(f"[TaskQueue] Job with idempotency key '{task_id}' already processed, skipping.")
+            logger.info(f"[TaskQueue] Job with ID '{task_id}' already processed, skipping.")
             return task_id
+
+        await client.set(dedup_key, task_id, ex=86400)
     except Exception as e:
         if settings.is_production:
             raise RuntimeError(f"Failed to access Redis queue in production: {e}")
@@ -289,6 +361,7 @@ async def enqueue_task(task_name: str, payload: Dict[str, Any], max_retries: int
         "task_name": task_name,
         "payload": payload,
         "retries_left": max_retries,
+        "max_retries": max_retries,
         "enqueued_at": datetime.now(timezone.utc).isoformat()
     }
 
@@ -311,21 +384,24 @@ async def enqueue_task(task_name: str, payload: Dict[str, Any], max_retries: int
 
     return task_id
 
-
 async def _execute_with_retries(fn, task_name: str, envelope: Dict[str, Any], retries: int):
     payload = envelope.get("payload", {})
     job_id = envelope.get("id")
     for attempt in range(1, retries + 1):
         try:
-            res = await fn(payload)
+            res = await execute_task_with_timeout(fn, payload)
             PROCESSED_JOB_KEYS.add(job_id)
+            client = await get_redis_client()
+            await client.sadd(PROCESSED_SET_KEY, job_id)
             return res
         except Exception as e:
             logger.warning(f"[TaskWorker] Task '{task_name}' attempt {attempt}/{retries} failed: {e}")
             if attempt < retries:
-                await asyncio.sleep(0.05 * (2 ** attempt))
+                delay = calculate_backoff_with_jitter(attempt)
+                await asyncio.sleep(delay)
             else:
                 await push_to_dlq(envelope, str(e))
+                logger.error(f"[TaskWorker] Task '{task_name}' failed permanently after {retries} retries. Moved to DLQ.")
                 logger.error(f"[TaskWorker] Task '{task_name}' failed permanently. Moved to DLQ.")
 
 
