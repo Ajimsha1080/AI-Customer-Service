@@ -504,6 +504,17 @@ async def get_current_user(
             exp = api_key_row.expires_at.replace(tzinfo=timezone.utc) if api_key_row.expires_at.tzinfo is None else api_key_row.expires_at
             if now > exp:
                 raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="API key has expired.")
+
+        # H15: Check organization status for API Key
+        stmt_org = select(Organization).where(Organization.id == api_key_row.organization_id)
+        res_org = await db.execute(stmt_org)
+        org_row = res_org.scalar_one_or_none()
+        if not org_row or (org_row.status and org_row.status.upper() in ("SUSPENDED", "INACTIVE")):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="ORGANIZATION_SUSPENDED: Organization is suspended or inactive. API key access disabled."
+            )
+
         # Enterprise RLS session binding for API key
         await set_tenant_context(db, api_key_row.organization_id)
         return User(
@@ -673,12 +684,18 @@ async def get_current_user(
                 db=db
             )
 
-    # IP Allowlist Enforcement per Organization
+    # H15: IP Allowlist & Organization Suspension Enforcement
     effective_org_id = payload.get("org_id") or user.organization_id
     if effective_org_id:
         stmt_org = select(Organization).where(Organization.id == effective_org_id)
         res_org = await db.execute(stmt_org)
         org = res_org.scalar_one_or_none()
+        if user.role != UserRole.SUPER_ADMIN:
+            if not org or (org.status and org.status.upper() in ("SUSPENDED", "INACTIVE")):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="ORGANIZATION_SUSPENDED: Your organization account has been suspended or deactivated. Contact support."
+                )
         if org and org.ip_allowlist:
             client_ip = None
             if request:

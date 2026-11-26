@@ -51,6 +51,13 @@ async def get_scim_org(
     if not org:
         raise HTTPException(status_code=404, detail="Organization associated with SCIM token not found.")
 
+    # H15: Check organization suspension
+    if org.status and org.status.upper() in ("SUSPENDED", "INACTIVE"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="ORGANIZATION_SUSPENDED: Organization is suspended or inactive. SCIM access disabled."
+        )
+
     await set_tenant_context(db, org.id)
     return org
 

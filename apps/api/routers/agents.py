@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from services.database.session import get_db, set_tenant_context
 from services.database.models import (
     User, Agent, AgentStatus, AgentConfig, UserRole, Conversation, Message,
-    SupportTicket, ConversationStatus, Property
+    SupportTicket, ConversationStatus, Property, Organization
 )
 from apps.api.auth import get_current_user, require_permission, verify_tenant_access, ROLE_HIERARCHY, create_guest_session_token, decode_guest_session_token
 from packages.agent_sdk.sdk import HospitalityAgentSDK
@@ -42,6 +42,16 @@ async def get_public_agent(request: Request, agent_id: str, db: AsyncSession = D
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Agent '{agent_id}' is not active."
+        )
+
+    # H15: Check organization suspension
+    org_stmt = select(Organization).where(Organization.id == agent.organization_id)
+    org_res = await db.execute(org_stmt)
+    org = org_res.scalar_one_or_none()
+    if not org or (org.status and org.status.upper() in ("SUSPENDED", "INACTIVE")):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Agent '{agent_id}' is not available."
         )
 
     cfg_stmt = select(AgentConfig).where(AgentConfig.agent_id == agent_id)
@@ -323,6 +333,17 @@ async def agent_chat(request: Request, agent_id: str, req: AgentChatRequest, db:
     # Derive org and property strictly from the agent record server-side
     effective_org_id = agent.organization_id
     effective_prop_id = agent.property_id
+
+    # Security Control (H15): Reject chat for suspended or inactive organizations
+    stmt_org = select(Organization).where(Organization.id == effective_org_id)
+    res_org = await db.execute(stmt_org)
+    org_rec = res_org.scalar_one_or_none()
+    if not org_rec or (org_rec.status and org_rec.status.upper() in ("SUSPENDED", "INACTIVE")):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="ORGANIZATION_SUSPENDED: The organization hosting this agent is suspended or deactivated. Guest chat unavailable."
+        )
+
     await set_tenant_context(db, effective_org_id)
 
     # Per-tenant fair-use token bucket rate limiter
@@ -541,6 +562,17 @@ async def agent_chat_stream(request: Request, agent_id: str, req: AgentChatReque
 
     effective_org_id = agent.organization_id
     effective_prop_id = agent.property_id
+
+    # Security Control (H15): Reject streaming chat for suspended organizations
+    stmt_org = select(Organization).where(Organization.id == effective_org_id)
+    res_org = await db.execute(stmt_org)
+    org_rec = res_org.scalar_one_or_none()
+    if not org_rec or (org_rec.status and org_rec.status.upper() in ("SUSPENDED", "INACTIVE")):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="ORGANIZATION_SUSPENDED: The organization hosting this agent is suspended or deactivated. Guest chat unavailable."
+        )
+
     await set_tenant_context(db, effective_org_id)
 
     # Per-tenant fair-use token bucket rate limiter

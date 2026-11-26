@@ -289,6 +289,16 @@ async def saml_sso_callback(
     if org_id:
         await set_tenant_context(db, org_id)
 
+    # H15: Check organization suspension
+    stmt_org = select(Organization).where(Organization.id == org_id)
+    res_org = await db.execute(stmt_org)
+    org_row = res_org.scalar_one_or_none()
+    if not org_row or (org_row.status and org_row.status.upper() in ("SUSPENDED", "INACTIVE")):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="ORGANIZATION_SUSPENDED: Your organization account has been suspended or deactivated. SSO login disabled."
+        )
+
     stmt = select(SSOConfig).where(SSOConfig.organization_id == org_id)
     res = await db.execute(stmt)
     config = res.scalar_one_or_none()
@@ -441,6 +451,16 @@ async def oidc_sso_callback(
 
     if org_id:
         await set_tenant_context(db, org_id)
+
+    # H15: Check organization suspension
+    stmt_org = select(Organization).where(Organization.id == org_id)
+    res_org = await db.execute(stmt_org)
+    org_row = res_org.scalar_one_or_none()
+    if not org_row or (org_row.status and org_row.status.upper() in ("SUSPENDED", "INACTIVE")):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="ORGANIZATION_SUSPENDED: Your organization account has been suspended or deactivated. SSO login disabled."
+        )
     expected_nonce = state_data.get("nonce")
 
     stmt = select(SSOConfig).where(SSOConfig.organization_id == org_id)

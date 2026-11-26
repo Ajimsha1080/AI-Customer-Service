@@ -320,6 +320,17 @@ async def login(request: Request, req: LoginRequest, response: Response, db: Asy
             detail="User account is deactivated"
         )
 
+    # H15: Check Organization Suspension
+    if user.organization_id and user.role != UserRole.SUPER_ADMIN:
+        stmt_org = select(Organization).where(Organization.id == user.organization_id)
+        res_org = await db.execute(stmt_org)
+        org_check = res_org.scalar_one_or_none()
+        if not org_check or (org_check.status and org_check.status.upper() in ("SUSPENDED", "INACTIVE")):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="ORGANIZATION_SUSPENDED: Your organization account has been suspended or deactivated. Contact support."
+            )
+
     # Check Organization-Enforced SSO Policy
     if user.organization_id:
         stmt_sso = select(SSOConfig).where(SSOConfig.organization_id == user.organization_id)
@@ -504,6 +515,17 @@ async def google_auth_callback(req: GoogleAuthCallbackRequest, db: AsyncSession 
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User account is deactivated."
         )
+
+    # H15: Check Organization Suspension for Google OAuth login
+    if user.organization_id and user.role != UserRole.SUPER_ADMIN:
+        stmt_org = select(Organization).where(Organization.id == user.organization_id)
+        res_org = await db.execute(stmt_org)
+        org_check = res_org.scalar_one_or_none()
+        if not org_check or (org_check.status and org_check.status.upper() in ("SUSPENDED", "INACTIVE")):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="ORGANIZATION_SUSPENDED: Your organization account has been suspended or deactivated. Contact support."
+            )
 
     access_token = create_access_token({"sub": user.id, "org_id": user.organization_id, "role": user.role.value if hasattr(user.role, "value") else str(user.role)})
     refresh_token = create_refresh_token({"sub": user.id})
