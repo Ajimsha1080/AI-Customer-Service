@@ -1,9 +1,12 @@
 import time
 import uuid
 import json
+import logging
 from datetime import datetime, timezone
+
+logger = logging.getLogger("hospitality_agent_cloud.integrations")
 from typing import Optional, List, Dict
-from fastapi import APIRouter, Depends, HTTPException, status, Request, Query, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, status, Request, Query, UploadFile, File, Form, BackgroundTasks
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -915,9 +918,74 @@ async def verify_whatsapp_webhook(
         return int(verified) if str(verified).isdigit() else verified
     raise HTTPException(status_code=403, detail="WhatsApp Webhook verification failed. Invalid verify_token.")
 
+async def _execute_whatsapp_agent_turn(
+    org_id: str,
+    property_id: Optional[str],
+    agent_id: str,
+    sender_phone: str,
+    msg_body: str
+):
+    """Executes the agent turn asynchronously and dispatches the reply over WhatsApp."""
+    from services.database.session import AsyncSessionLocal
+    async with AsyncSessionLocal() as session:
+        await set_tenant_context(session, org_id)
+        stmt = select(Agent).where(
+            Agent.id == agent_id,
+            Agent.organization_id == org_id,
+            Agent.status == AgentStatus.ACTIVE
+        )
+        res = await session.execute(stmt)
+        agent = res.scalar_one_or_none()
+        if not agent:
+            return
+
+        cfg_stmt = select(AgentConfig).where(AgentConfig.agent_id == agent.id)
+        cfg_res = await session.execute(cfg_stmt)
+        config = cfg_res.scalar_one_or_none()
+
+        engine = AgentRuntimeEngine(db_session=session)
+        agent_config_dict = {
+            "model_name": config.model_name if config else "sarvam-2b",
+            "system_prompt": config.system_prompt if config else "You are an AI Concierge.",
+            "enabled_tools": config.enabled_tools if config else []
+        }
+        turn = await engine.execute_agent_turn(
+            agent_config=agent_config_dict,
+            user_message=msg_body,
+            conversation_history=[],
+            organization_id=org_id,
+            property_id=property_id or agent.property_id,
+            agent_id=agent.id,
+            channel="whatsapp",
+            user_context={"user_role": "guest", "user_id": sender_phone}
+        )
+        reply = turn.get("response", "Thank you for contacting us.")
+
+        # Prepare message via whatsapp_bsp enforcing 24-hr window
+        prepared_msg = whatsapp_bsp.prepare_outbound_message(
+            recipient_phone=sender_phone,
+            last_inbound_time=datetime.now(timezone.utc),
+            freeform_text=reply
+        )
+
+        async def _send_reply():
+            return await whatsapp_client.send_text_message(sender_phone, reply)
+
+        try:
+            await whatsapp_circuit_breaker.call(_send_reply)
+        except CircuitBreakerOpenError as cbe:
+            logger.error(f"WhatsApp circuit breaker open: {cbe}")
+
+
 @router.post("/api/v1/integrations/whatsapp/webhook", tags=["WhatsApp Integration"], dependencies=[Depends(enforce_tenant_fair_use_quota)])
-async def process_whatsapp_inbound_webhook(request: Request, db: AsyncSession = Depends(get_db)):
-    """Processes inbound WhatsApp messages and status updates from Meta."""
+async def process_whatsapp_inbound_webhook(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db)
+):
+    """Processes inbound WhatsApp messages across schema variations (Meta Cloud v16+ and direct payload),
+    verifies signature (fails closed), drops unmapped numbers, dedupes via Redis/Postgres, and dispatches processing.
+    """
     if feature_flags.is_kill_switch_active("kill_switch_integrations"):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -928,116 +996,90 @@ async def process_whatsapp_inbound_webhook(request: Request, db: AsyncSession = 
     signature = request.headers.get("x-hub-signature-256") or ""
     is_valid_sig = whatsapp_bsp.verify_inbound_signature(payload_bytes, signature)
     if not is_valid_sig:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid WhatsApp webhook signature.")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid WhatsApp webhook signature.")
 
     try:
         data = json.loads(payload_bytes.decode("utf-8")) if payload_bytes else {}
     except Exception:
         data = {}
 
-    entries = data.get("entry", [])
-    processed_count = 0
+    inbound_messages = whatsapp_bsp.extract_inbound_messages(data)
+    queued_count = 0
 
-    for entry in entries:
-        for change in entry.get("changes", []):
-            val = change.get("value", {})
-            phone_number_id = str(val.get("metadata", {}).get("phone_number_id", ""))
-            if not phone_number_id:
-                continue
+    for msg in inbound_messages:
+        phone_number_id = msg.get("phone_number_id")
+        if not phone_number_id:
+            continue
 
-            # Route by metadata.phone_number_id through per-tenant channel-mapping table
-            stmt_map = select(WhatsAppChannelMapping).where(
-                WhatsAppChannelMapping.phone_number_id == phone_number_id,
-                WhatsAppChannelMapping.is_active == True
+        # Route by metadata.phone_number_id through per-tenant channel-mapping table
+        stmt_map = select(WhatsAppChannelMapping).where(
+            WhatsAppChannelMapping.phone_number_id == phone_number_id,
+            WhatsAppChannelMapping.is_active == True
+        )
+        res_map = await db.execute(stmt_map)
+        mapping = res_map.scalar_one_or_none()
+        if not mapping:
+            # F2: drop unmapped numbers
+            logger.info(f"[WhatsApp] Dropping message from unmapped phone_number_id: {phone_number_id}")
+            continue
+
+        # Set tenant context
+        await set_tenant_context(db, mapping.organization_id)
+
+        msg_id = msg.get("msg_id")
+        if not msg_id:
+            continue
+
+        # Deduplicate by message ID (Redis 24h TTL + Postgres)
+        redis_client = getattr(request.app.state, "redis", None)
+        if not redis_client:
+            try:
+                from services.common.redis_service import get_redis_client_sync
+                redis_client = get_redis_client_sync()
+            except Exception:
+                redis_client = None
+
+        if redis_client:
+            try:
+                dedupe_key = f"wa_msg:{msg_id}"
+                if hasattr(redis_client, "set"):
+                    import inspect
+                    res_set = redis_client.set(dedupe_key, "1", nx=True, ex=86400)
+                    if inspect.isawaitable(res_set):
+                        is_new = await res_set
+                    else:
+                        is_new = res_set
+                    if not is_new:
+                        logger.info(f"[WhatsApp] Duplicate message ignored (Redis): {msg_id}")
+                        continue
+            except Exception as e:
+                logger.warning(f"[WhatsApp] Redis dedupe error: {e}")
+
+        stmt_dedupe = select(ProcessedWebhookEvent).where(ProcessedWebhookEvent.event_id == f"wa_{msg_id}")
+        res_dedupe = await db.execute(stmt_dedupe)
+        if res_dedupe.scalar_one_or_none():
+            logger.info(f"[WhatsApp] Duplicate message ignored (DB): {msg_id}")
+            continue
+
+        db.add(ProcessedWebhookEvent(
+            id=f"wa_{msg_id}",
+            event_id=f"wa_{msg_id}",
+            event_type="whatsapp_inbound"
+        ))
+        await db.flush()
+
+        sender_phone = msg.get("sender_phone")
+        msg_body = msg.get("text", "")
+        if sender_phone and msg_body:
+            background_tasks.add_task(
+                _execute_whatsapp_agent_turn,
+                org_id=mapping.organization_id,
+                property_id=mapping.property_id,
+                agent_id=mapping.agent_id,
+                sender_phone=sender_phone,
+                msg_body=msg_body
             )
-            res_map = await db.execute(stmt_map)
-            mapping = res_map.scalar_one_or_none()
-            if not mapping:
-                # Security control C7: drop unmapped messages
-                continue
+            queued_count += 1
 
-            # Set tenant context
-            await set_tenant_context(db, mapping.organization_id)
-
-            messages = val.get("messages", [])
-            for msg in messages:
-                msg_id = msg.get("id")
-                if not msg_id:
-                    continue
-
-                # Deduplicate by message ID (Redis + Postgres)
-                redis_client = getattr(request.app.state, "redis", None)
-                if redis_client:
-                    try:
-                        dedupe_key = f"wa_msg:{msg_id}"
-                        is_new = await redis_client.set(dedupe_key, "1", nx=True, ex=86400)
-                        if not is_new:
-                            continue
-                    except Exception:
-                        pass
-
-                stmt_dedupe = select(ProcessedWebhookEvent).where(ProcessedWebhookEvent.event_id == f"wa_{msg_id}")
-                res_dedupe = await db.execute(stmt_dedupe)
-                if res_dedupe.scalar_one_or_none():
-                    continue
-
-                db.add(ProcessedWebhookEvent(
-                    id=f"wa_{msg_id}",
-                    event_id=f"wa_{msg_id}",
-                    event_type="whatsapp_inbound"
-                ))
-                await db.flush()
-
-                sender_phone = msg.get("from")
-                msg_body = msg.get("text", {}).get("body", "")
-                if sender_phone and msg_body:
-                    # Look up specifically mapped active agent for this tenant
-                    stmt = select(Agent).where(
-                        Agent.id == mapping.agent_id,
-                        Agent.organization_id == mapping.organization_id,
-                        Agent.status == AgentStatus.ACTIVE
-                    )
-                    agent_res = await db.execute(stmt)
-                    agent = agent_res.scalar_one_or_none()
-
-                    if agent:
-                        cfg_stmt = select(AgentConfig).where(AgentConfig.agent_id == agent.id)
-                        cfg_res = await db.execute(cfg_stmt)
-                        config = cfg_res.scalar_one_or_none()
-
-                        engine = AgentRuntimeEngine(db_session=db)
-                        agent_config_dict = {
-                            "model_name": config.model_name if config else "sarvam-2b",
-                            "system_prompt": config.system_prompt if config else "You are an AI Concierge.",
-                            "enabled_tools": config.enabled_tools if config else []
-                        }
-                        turn = await engine.execute_agent_turn(
-                            agent_config=agent_config_dict,
-                            user_message=msg_body,
-                            conversation_history=[],
-                            organization_id=mapping.organization_id,
-                            property_id=mapping.property_id or agent.property_id,
-                            agent_id=agent.id,
-                            channel="whatsapp",
-                            user_context={"user_role": "guest", "user_id": sender_phone}
-                        )
-                        reply = turn.get("response", "Thank you for contacting us.")
-
-                        # Prepare message via whatsapp_bsp enforcing 24-hr window
-                        prepared_msg = whatsapp_bsp.prepare_outbound_message(
-                            recipient_phone=sender_phone,
-                            last_inbound_time=datetime.now(timezone.utc),
-                            freeform_text=reply
-                        )
-
-                        # Send via circuit-breaker protected call
-                        async def _send_reply():
-                            return await whatsapp_client.send_text_message(sender_phone, reply)
-
-                        try:
-                            await whatsapp_circuit_breaker.call(_send_reply)
-                        except CircuitBreakerOpenError as cbe:
-                            logger.error(f"WhatsApp circuit breaker open: {cbe}")
-                        processed_count += 1
-
-    return {"status": "SUCCESS", "events_processed": processed_count}
+    await db.commit()
+    return {"status": "SUCCESS", "events_queued": queued_count}

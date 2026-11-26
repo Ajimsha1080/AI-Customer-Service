@@ -106,4 +106,84 @@ class WhatsAppBusinessService:
                 "text": {"body": freeform_text or ""}
             }
 
+    @staticmethod
+    def extract_inbound_messages(data: Dict[str, Any]) -> list[Dict[str, Any]]:
+        """Parses Meta WhatsApp inbound webhook payloads across schema variations:
+        1. Standard v16+ webhook: entry[].changes[].value.messages[]
+        2. Direct messages payload: data.messages[] with top-level metadata or phone_number_id
+        Normalizes text, image, audio/voice, location, and interactive button replies.
+        """
+        extracted = []
+
+        # Schema 1: Standard entry -> changes -> value structure
+        if "entry" in data and isinstance(data["entry"], list):
+            for entry in data["entry"]:
+                for change in entry.get("changes", []):
+                    val = change.get("value", {})
+                    phone_number_id = str(val.get("metadata", {}).get("phone_number_id", ""))
+                    messages = val.get("messages", [])
+                    for msg in messages:
+                        item = WhatsAppBusinessService._normalize_single_message(msg, phone_number_id)
+                        if item:
+                            extracted.append(item)
+
+        # Schema 2: Direct messages list
+        elif "messages" in data and isinstance(data["messages"], list):
+            phone_number_id = str(
+                data.get("phone_number_id") or
+                data.get("metadata", {}).get("phone_number_id") or
+                ""
+            )
+            for msg in data["messages"]:
+                item = WhatsAppBusinessService._normalize_single_message(msg, phone_number_id)
+                if item:
+                    extracted.append(item)
+
+        return extracted
+
+    @staticmethod
+    def _normalize_single_message(msg: Dict[str, Any], phone_number_id: str) -> Optional[Dict[str, Any]]:
+        msg_id = msg.get("id")
+        sender = msg.get("from")
+        if not msg_id or not sender:
+            return None
+
+        msg_type = msg.get("type", "text")
+        text_content = ""
+
+        if msg_type == "text":
+            text_content = msg.get("text", {}).get("body", "")
+        elif msg_type == "image":
+            text_content = msg.get("image", {}).get("caption") or "[Image message received]"
+        elif msg_type in ("audio", "voice"):
+            text_content = "[Voice message received]"
+        elif msg_type == "location":
+            loc = msg.get("location", {})
+            lat = loc.get("latitude")
+            lng = loc.get("longitude")
+            name = loc.get("name", "")
+            text_content = f"[Location: latitude={lat}, longitude={lng}, name={name}]"
+        elif msg_type == "interactive":
+            interactive = msg.get("interactive", {})
+            itype = interactive.get("type")
+            if itype == "button_reply":
+                text_content = interactive.get("button_reply", {}).get("title") or interactive.get("button_reply", {}).get("id", "")
+            elif itype == "list_reply":
+                text_content = interactive.get("list_reply", {}).get("title") or interactive.get("list_reply", {}).get("id", "")
+            else:
+                text_content = "[Interactive response]"
+        elif msg_type == "button":
+            text_content = msg.get("button", {}).get("text") or msg.get("button", {}).get("payload", "")
+        else:
+            text_content = f"[{msg_type} received]"
+
+        return {
+            "msg_id": msg_id,
+            "sender_phone": sender,
+            "phone_number_id": phone_number_id,
+            "type": msg_type,
+            "text": text_content,
+            "raw": msg
+        }
+
 whatsapp_bsp = WhatsAppBusinessService()
