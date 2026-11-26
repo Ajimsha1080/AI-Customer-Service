@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from services.database.session import get_db, set_tenant_context
 from services.database.models import (
     User, Agent, AgentStatus, AgentConfig, UserRole, Conversation, Message,
-    SupportTicket, ConversationStatus
+    SupportTicket, ConversationStatus, Property
 )
 from apps.api.auth import get_current_user, require_permission, verify_tenant_access, ROLE_HIERARCHY, create_guest_session_token, decode_guest_session_token
 from packages.agent_sdk.sdk import HospitalityAgentSDK
@@ -111,6 +111,16 @@ async def _verify_and_get_agent(agent_id: str, current_user: User, db: AsyncSess
 @router.post("")
 async def create_agent(req: CreateAgentRequest, current_user: User = Depends(require_permission("agent:write")), db: AsyncSession = Depends(get_db)):
     org_id = verify_tenant_access(current_user, req.organization_id)
+
+    # H7: Validate property_id strictly belongs to the caller's organization
+    stmt_prop = select(Property).where(Property.id == req.property_id, Property.organization_id == org_id)
+    res_prop = await db.execute(stmt_prop)
+    if not res_prop.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Property '{req.property_id}' does not belong to organization '{org_id}' or does not exist."
+        )
+
     normalized_type = req.agent_type.upper()
     if normalized_type not in VALID_AGENT_TYPES:
         raise HTTPException(
