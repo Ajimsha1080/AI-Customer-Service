@@ -39,14 +39,6 @@ export default function RegisterPage() {
         throw new Error(data.detail || 'Registration failed. Please try again.');
       }
 
-      if (data.access_token) {
-        localStorage.setItem('token', data.access_token);
-        localStorage.setItem('access_token', data.access_token);
-      }
-      if (data.refresh_token) {
-        localStorage.setItem('refresh_token', data.refresh_token);
-      }
-
       router.push('/app/onboarding');
     } catch (err: any) {
       setError(err.message || 'An error occurred during registration.');

@@ -1,6 +1,7 @@
 import re
 import time
 import uuid
+import secrets
 import hashlib
 from datetime import datetime, timezone, timedelta
 from typing import Optional
@@ -70,7 +71,7 @@ class GoogleAuthCallbackRequest(BaseModel):
     state: Optional[str] = None
     redirect_uri: Optional[str] = "http://localhost:3002/auth/callback/google"
 
-def set_auth_cookies(response: Response, access_token: str, refresh_token: str) -> None:
+def set_auth_cookies(response: Response, access_token: str, refresh_token: str) -> str:
     is_secure = settings.COOKIE_SECURE or (settings.ENVIRONMENT.lower() in ("production", "prod"))
     cookie_kwargs = {
         "httponly": True,
@@ -84,6 +85,18 @@ def set_auth_cookies(response: Response, access_token: str, refresh_token: str) 
     response.set_cookie(key="session_token", value=access_token, max_age=1800, **cookie_kwargs)
     response.set_cookie(key="refresh_token", value=refresh_token, max_age=7*86400, **cookie_kwargs)
 
+    # CSRF double-submit token (accessible to frontend JavaScript for X-CSRF-Token header)
+    csrf_token = secrets.token_hex(32)
+    csrf_kwargs = {
+        "httponly": False,
+        "samesite": settings.COOKIE_SAMESITE,
+        "secure": is_secure,
+    }
+    if settings.COOKIE_DOMAIN:
+        csrf_kwargs["domain"] = settings.COOKIE_DOMAIN
+    response.set_cookie(key="csrf_token", value=csrf_token, max_age=7*86400, **csrf_kwargs)
+    return csrf_token
+
 def clear_auth_cookies(response: Response) -> None:
     cookie_kwargs = {}
     if settings.COOKIE_DOMAIN:
@@ -91,6 +104,7 @@ def clear_auth_cookies(response: Response) -> None:
     response.delete_cookie(key="access_token", **cookie_kwargs)
     response.delete_cookie(key="session_token", **cookie_kwargs)
     response.delete_cookie(key="refresh_token", **cookie_kwargs)
+    response.delete_cookie(key="csrf_token", **cookie_kwargs)
 
 @router.post("/register")
 @limiter.limit("10/minute")

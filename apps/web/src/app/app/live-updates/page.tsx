@@ -5,7 +5,7 @@ import {
   Bell, Building2, Wrench, Database, Link as LinkIcon, RefreshCw, 
   ShieldCheck, AlertCircle, Edit3, Check, Sliders, ToggleLeft, ToggleRight
 } from 'lucide-react';
-import { API_BASE } from '@/lib/api';
+import { API_BASE, authFetch } from '@/lib/api';
 
 export default function AppLiveUpdatesPage() {
   const [activeTab, setActiveTab] = useState<'food' | 'notices' | 'facilities' | 'rooms' | 'integrations'>('food');
@@ -103,13 +103,8 @@ export default function AppLiveUpdatesPage() {
     let es: EventSource | null = null;
     async function initSSE() {
       try {
-        const ticketRes = await fetch(`${API_BASE}/api/v1/realtime/ticket`, {
+        const ticketRes = await authFetch('/api/v1/realtime/ticket', {
           method: 'POST',
-          credentials: 'include',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(typeof window !== 'undefined' && localStorage.getItem('token') ? { 'Authorization': `Bearer ${localStorage.getItem('token')}` } : {})
-          }
         });
         if (!ticketRes.ok) return;
         const { ticket } = await ticketRes.json();
@@ -132,10 +127,7 @@ export default function AppLiveUpdatesPage() {
 
     async function loadIntegrations() {
       try {
-        const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
-        const res = await fetch(`${API_BASE}/api/v1/live-updates/integrations`, {
-          headers: token ? { 'Authorization': `Bearer ${token}` } : {}
-        });
+        const res = await authFetch('/api/v1/live-updates/integrations');
         if (res.ok) {
           const data = await res.json();
           setIntegrations(Array.isArray(data) ? data : []);
@@ -250,13 +242,8 @@ export default function AppLiveUpdatesPage() {
   const handleTestConnection = async (id: string) => {
     showToast('Testing integration connection handshake...');
     try {
-      const res = await fetch(`${API_BASE}/api/v1/live-updates/integrations/${id}/test`, {
+      const res = await authFetch(`/api/v1/live-updates/integrations/${id}/test`, {
         method: 'POST',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(typeof window !== 'undefined' && localStorage.getItem('token') ? { 'Authorization': `Bearer ${localStorage.getItem('token')}` } : {})
-        }
       });
       const data = await res.json();
       if (res.ok && data.success) {
@@ -272,13 +259,8 @@ export default function AppLiveUpdatesPage() {
   const handleSyncNow = async (id: string) => {
     showToast('Syncing latest live data from integration source...');
     try {
-      const res = await fetch(`${API_BASE}/api/v1/live-updates/integrations/${id}/sync`, {
+      const res = await authFetch(`/api/v1/live-updates/integrations/${id}/sync`, {
         method: 'POST',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(typeof window !== 'undefined' && localStorage.getItem('token') ? { 'Authorization': `Bearer ${localStorage.getItem('token')}` } : {})
-        }
       });
       const data = await res.json();
       if (res.ok) {

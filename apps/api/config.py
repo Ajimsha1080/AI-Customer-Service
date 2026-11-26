@@ -221,6 +221,10 @@ class Settings(BaseSettings):
         if self.KMS_PROVIDER.lower() != "aws_kms" or is_insecure(self.KMS_PRIMARY_KEY_ID):
             raise ValueError("CRITICAL SECURITY RISK: KMS_PRIMARY_KEY_ID must be configured as a real AWS KMS Key ARN in production!")
 
+        # 8. Cookie Security (H11)
+        if not self.COOKIE_SECURE:
+            raise ValueError("CRITICAL SECURITY RISK: COOKIE_SECURE must be True in production!")
+
         return self
 
 settings = Settings()

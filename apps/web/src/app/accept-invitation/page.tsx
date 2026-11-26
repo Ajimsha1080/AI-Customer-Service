@@ -49,14 +49,6 @@ function AcceptInvitationForm() {
         throw new Error(data.detail || 'Failed to accept invitation. The invitation may be expired or already used.');
       }
 
-      if (data.access_token) {
-        localStorage.setItem('token', data.access_token);
-        localStorage.setItem('access_token', data.access_token);
-      }
-      if (data.refresh_token) {
-        localStorage.setItem('refresh_token', data.refresh_token);
-      }
-
       router.push('/app/dashboard');
     } catch (err: any) {
       setError(err.message || 'An error occurred.');

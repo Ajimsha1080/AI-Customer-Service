@@ -515,14 +515,36 @@ async def get_current_user(
             is_active=True
         )
 
-    if not credentials or not credentials.credentials:
+    raw_token = None
+    is_cookie_auth = False
+    if credentials and credentials.credentials:
+        raw_token = credentials.credentials
+    elif request and (request.cookies.get("access_token") or request.cookies.get("session_token")):
+        raw_token = request.cookies.get("access_token") or request.cookies.get("session_token")
+        is_cookie_auth = True
+
+    if not raw_token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication credentials were not provided. Bearer token required.",
+            detail="Authentication credentials were not provided. Bearer token or cookie required.",
             headers={"WWW-Authenticate": "Bearer"}
         )
-    
-    raw_token = credentials.credentials
+
+    # CSRF Double-Submit Protection for cookie-authenticated mutating requests
+    if is_cookie_auth and request and request.method in ("POST", "PUT", "PATCH", "DELETE"):
+        csrf_cookie = request.cookies.get("csrf_token")
+        csrf_header = (
+            request.headers.get("x-csrf-token")
+            or request.headers.get("X-CSRF-Token")
+            or request.headers.get("x-xsrf-token")
+            or request.headers.get("X-XSRF-Token")
+        )
+        if not csrf_cookie or not csrf_header or not secrets.compare_digest(csrf_cookie.strip(), csrf_header.strip()):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="CSRF validation failed: token missing or mismatch."
+            )
+
     token_hash = _hash_token(raw_token)
     from services.common.redis_service import get_redis_client
     redis = await get_redis_client()

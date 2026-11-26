@@ -34,14 +34,6 @@ function LoginForm() {
         throw new Error(data.detail || 'Invalid email or password');
       }
 
-      if (data.access_token) {
-        localStorage.setItem('token', data.access_token);
-        localStorage.setItem('access_token', data.access_token);
-      }
-      if (data.refresh_token) {
-        localStorage.setItem('refresh_token', data.refresh_token);
-      }
-
       const role = data.user?.role;
       if (role === 'SUPER_ADMIN') {
         router.push(redirectPath.startsWith('/platform') ? redirectPath : '/platform/dashboard');
