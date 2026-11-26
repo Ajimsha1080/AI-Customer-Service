@@ -1,3 +1,4 @@
+from datetime import date, timedelta
 import pytest
 import asyncio
 from sqlalchemy import select
@@ -11,6 +12,11 @@ async def test_reservation_lifecycle_and_db_persistence():
     org_id = "org_azure_group"
     prop_id = "prop_azure_palm_resort"
     enabled_tools = ["create_booking", "modify_booking", "cancel_booking", "check_room_availability"]
+
+    d1 = (date.today() + timedelta(days=5)).isoformat()
+    d2 = (date.today() + timedelta(days=9)).isoformat()
+    d3 = (date.today() + timedelta(days=6)).isoformat()
+    d4 = (date.today() + timedelta(days=10)).isoformat()
 
     # Seed room so real inventory exists
     async with AsyncSessionLocal() as session:
@@ -39,8 +45,8 @@ async def test_reservation_lifecycle_and_db_persistence():
         tool_args={
             "customer_name": "Test Guest Resident",
             "customer_email": "testguest@residence.com",
-            "check_in": "2026-10-01",
-            "check_out": "2026-10-05",
+            "check_in": d1,
+            "check_out": d2,
             "room_type": "Single Bed Room"
         },
         organization_id=org_id,
@@ -67,8 +73,8 @@ async def test_reservation_lifecycle_and_db_persistence():
         tool_name="modify_booking",
         tool_args={
             "booking_id": booking_id,
-            "check_in": "2026-10-02",
-            "check_out": "2026-10-06"
+            "check_in": d3,
+            "check_out": d4
         },
         organization_id=org_id,
         property_id=prop_id,
@@ -85,7 +91,7 @@ async def test_reservation_lifecycle_and_db_persistence():
         db_res = res.scalar_one_or_none()
         assert db_res is not None
         assert db_res.status == "MODIFIED"
-        assert db_res.check_in == "2026-10-02"
+        assert db_res.check_in == d3
 
     # 3. Cancel booking
     cancel_res = await registry.execute_tool(

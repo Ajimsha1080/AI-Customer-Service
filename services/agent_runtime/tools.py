@@ -10,6 +10,8 @@ from services.database.session import AsyncSessionLocal
 from services.database.models import (
     Property, Room, Facility, LiveUpdate, Reservation, Restaurant, Activity, Conversation, DataAccessPolicy, SupportTicket, Resident, RatePlan
 )
+from services.common.redis_service import acquire_distributed_lock
+from services.security.email_service import EmailDeliveryService
 
 logger = logging.getLogger("hospitality_agent_cloud.agent_runtime.tools")
 
@@ -776,6 +778,7 @@ class HospitalityToolRegistry:
         check_in_str = args.get("check_in")
         check_out_str = args.get("check_out")
         room_type = args.get("room_type", "Standard Room")
+        guest_count = int(args.get("guest_count", 1))
 
         if not customer_name or not customer_email or not check_in_str or not check_out_str:
             return {"success": False, "error": "customer_name, customer_email, check_in, and check_out are required"}
@@ -785,85 +788,111 @@ class HospitalityToolRegistry:
             d_out = date.fromisoformat(check_out_str)
             if d_out <= d_in:
                 return {"success": False, "error": "check_out date must be strictly after check_in date"}
+            if d_in < date.today():
+                return {"success": False, "error": "check_in date cannot be in the past"}
         except ValueError:
             return {"success": False, "error": "Invalid date format. Use YYYY-MM-DD"}
 
         num_nights = (d_out - d_in).days
+        lock_key = f"hac:lock:inventory:{property_id}:{room_type}"
 
-        async with self._session_scope() as session:
-            stmt_rooms = select(Room).where(
-                Room.organization_id == organization_id,
-                Room.property_id == property_id,
-                Room.is_available == True
-            )
-            if room_type:
-                stmt_rooms = stmt_rooms.where(Room.room_type.ilike(f"%{room_type}%"))
-            res_rooms = await session.execute(stmt_rooms)
-            candidate_rooms = res_rooms.scalars().all()
+        try:
+            async with acquire_distributed_lock(lock_key, ttl_seconds=10, acquire_timeout=2.0):
+                async with self._session_scope() as session:
+                    stmt_rooms = select(Room).where(
+                        Room.organization_id == organization_id,
+                        Room.property_id == property_id,
+                        Room.is_available == True
+                    )
+                    if room_type:
+                        stmt_rooms = stmt_rooms.where(Room.room_type.ilike(f"%{room_type}%"))
+                    res_rooms = await session.execute(stmt_rooms)
+                    candidate_rooms = res_rooms.scalars().all()
 
-            if not candidate_rooms:
-                return {"success": False, "status": "NO_VACANCY", "error": f"No rooms of type '{room_type}' available"}
+                    if not candidate_rooms:
+                        return {"success": False, "status": "NO_VACANCY", "error": f"No rooms of type '{room_type}' available"}
 
-            stmt_conflicts = select(Reservation).where(
-                Reservation.organization_id == organization_id,
-                Reservation.property_id == property_id,
-                Reservation.status.in_(["CONFIRMED", "MODIFIED"])
-            )
-            res_conf = await session.execute(stmt_conflicts)
-            active_conf = res_conf.scalars().all()
+                    stmt_conflicts = select(Reservation).where(
+                        Reservation.organization_id == organization_id,
+                        Reservation.property_id == property_id,
+                        Reservation.status.in_(["CONFIRMED", "MODIFIED"])
+                    )
+                    res_conf = await session.execute(stmt_conflicts)
+                    active_conf = res_conf.scalars().all()
 
-            occupied_ids = set()
-            for r in active_conf:
-                if not (r.check_out <= check_in_str or r.check_in >= check_out_str):
-                    if r.room_id:
-                        occupied_ids.add(r.room_id)
+                    occupied_ids = set()
+                    for r in active_conf:
+                        if not (r.check_out <= check_in_str or r.check_in >= check_out_str):
+                            if r.room_id:
+                                occupied_ids.add(r.room_id)
 
-            assigned_room = next((rm for rm in candidate_rooms if rm.id not in occupied_ids), None)
-            if not assigned_room:
-                return {"success": False, "status": "NO_VACANCY", "error": "No rooms available for requested dates"}
+                    assigned_room = next((rm for rm in candidate_rooms if rm.id not in occupied_ids), None)
+                    if not assigned_room:
+                        return {"success": False, "status": "NO_VACANCY", "error": "No rooms available for requested dates"}
 
-            stmt_rate = select(RatePlan).where(
-                RatePlan.organization_id == organization_id,
-                RatePlan.property_id == property_id,
-                RatePlan.room_type.ilike(f"%{assigned_room.room_type}%"),
-                RatePlan.is_active == True
-            )
-            res_rate = await session.execute(stmt_rate)
-            rate_plan = res_rate.scalars().first()
-            price_per_night = rate_plan.price_per_night if rate_plan else assigned_room.price_per_night
-            total_amount = round(price_per_night * num_nights, 2)
+                    if assigned_room.max_occupancy and guest_count > assigned_room.max_occupancy:
+                        return {
+                            "success": False,
+                            "error": f"Guest count {guest_count} exceeds maximum room capacity of {assigned_room.max_occupancy}"
+                        }
 
-            booking_id = f"RES-{uuid.uuid4().hex[:6].upper()}"
-            res = Reservation(
-                id=booking_id,
-                organization_id=organization_id,
-                property_id=property_id,
-                room_id=assigned_room.id,
-                rate_plan_id=rate_plan.id if rate_plan else None,
-                customer_name=customer_name,
-                customer_email=customer_email,
-                check_in=check_in_str,
-                check_out=check_out_str,
-                total_amount=total_amount,
-                status="CONFIRMED"
-            )
-            session.add(res)
-            await session.commit()
-            return {
-                "booking_id": booking_id,
-                "customer_name": res.customer_name,
-                "customer_email": res.customer_email,
-                "room_id": assigned_room.id,
-                "room_number": assigned_room.room_number,
-                "room_type": assigned_room.room_type,
-                "nights": num_nights,
-                "price_per_night": price_per_night,
-                "total_amount": total_amount,
-                "total_price": total_amount,
-                "check_in": res.check_in,
-                "check_out": res.check_out,
-                "status": "CONFIRMED"
-            }
+                    stmt_rate = select(RatePlan).where(
+                        RatePlan.organization_id == organization_id,
+                        RatePlan.property_id == property_id,
+                        RatePlan.room_type.ilike(f"%{assigned_room.room_type}%"),
+                        RatePlan.is_active == True
+                    )
+                    res_rate = await session.execute(stmt_rate)
+                    rate_plan = res_rate.scalars().first()
+                    price_per_night = rate_plan.price_per_night if rate_plan else assigned_room.price_per_night
+                    total_amount = round(price_per_night * num_nights, 2)
+
+                    booking_id = f"RES-{uuid.uuid4().hex[:6].upper()}"
+                    res = Reservation(
+                        id=booking_id,
+                        organization_id=organization_id,
+                        property_id=property_id,
+                        room_id=assigned_room.id,
+                        rate_plan_id=rate_plan.id if rate_plan else None,
+                        customer_name=customer_name,
+                        customer_email=customer_email,
+                        check_in=check_in_str,
+                        check_out=check_out_str,
+                        total_amount=total_amount,
+                        status="CONFIRMED"
+                    )
+                    session.add(res)
+                    await session.commit()
+
+                    try:
+                        email_service = EmailDeliveryService()
+                        await email_service.send_transactional_email(
+                            to_email=customer_email,
+                            subject=f"Booking Confirmation - {booking_id}",
+                            html_content=f"<h2>Booking Confirmed</h2><p>Dear {customer_name}, your booking {booking_id} for room {assigned_room.room_number} ({assigned_room.room_type}) from {check_in_str} to {check_out_str} is confirmed.</p><p>Total: ${total_amount:.2f}</p>"
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to dispatch booking confirmation email: {e}")
+
+                    return {
+                        "booking_id": booking_id,
+                        "customer_name": res.customer_name,
+                        "customer_email": res.customer_email,
+                        "room_id": assigned_room.id,
+                        "room_number": assigned_room.room_number,
+                        "room_type": assigned_room.room_type,
+                        "nights": num_nights,
+                        "price_per_night": price_per_night,
+                        "total_amount": total_amount,
+                        "total_price": total_amount,
+                        "check_in": res.check_in,
+                        "check_out": res.check_out,
+                        "status": "CONFIRMED"
+                    }
+        except RuntimeError as e:
+            if "LockAcquisitionTimeout" in str(e):
+                return {"success": False, "status": "LOCKED", "error": "Room inventory is locked by a concurrent booking transaction"}
+            raise
 
     async def tool_modify_booking(self, args: Dict[str, Any], organization_id: str, property_id: str) -> Dict[str, Any]:
         booking_id = args.get("booking_id")

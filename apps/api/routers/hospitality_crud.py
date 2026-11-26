@@ -14,6 +14,8 @@ from services.database.models import (
 from apps.api.auth import get_current_user, verify_tenant_access, require_role
 from services.realtime.broadcaster import realtime_hub
 from services.database.pagination import paginate_query
+from services.common.redis_service import acquire_distributed_lock
+from services.security.email_service import EmailDeliveryService
 
 router = APIRouter(tags=["Hospitality Data Plane"])
 
@@ -144,6 +146,7 @@ class ReservationCreate(BaseModel):
     customer_email: str
     check_in: str
     check_out: str
+    guest_count: Optional[int] = 1
     special_requests: Optional[str] = None
 
 class ReservationUpdate(BaseModel):
@@ -699,70 +702,103 @@ async def create_reservation(data: ReservationCreate, current_user: User = Depen
         d_out = date.fromisoformat(data.check_out)
         if d_out <= d_in:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="check_out must be strictly after check_in")
+        if d_in < date.today():
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="check_in cannot be in the past")
     except ValueError:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid date format. Use YYYY-MM-DD")
 
     num_nights = (d_out - d_in).days
+    guest_count = data.guest_count or 1
+    if guest_count < 1:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="guest_count must be at least 1")
 
-    # Room Allocation
-    stmt_rooms = select(Room).where(Room.property_id == data.property_id, Room.is_available == True)
-    if data.room_id:
-        stmt_rooms = stmt_rooms.where(Room.id == data.room_id)
-    elif data.room_type:
-        stmt_rooms = stmt_rooms.where(Room.room_type.ilike(f"%{data.room_type}%"))
-    res_rooms = await db.execute(stmt_rooms)
-    candidate_rooms = res_rooms.scalars().all()
+    # Distributed lock to prevent race conditions & double-booking
+    lock_key = f"hac:lock:inventory:{data.property_id}:{data.room_id or 'pool'}"
+    try:
+        async with acquire_distributed_lock(lock_key, ttl_seconds=10, acquire_timeout=2.0):
+            # Room Allocation
+            stmt_rooms = select(Room).where(Room.property_id == data.property_id, Room.is_available == True)
+            if data.room_id:
+                stmt_rooms = stmt_rooms.where(Room.id == data.room_id)
+            elif data.room_type:
+                stmt_rooms = stmt_rooms.where(Room.room_type.ilike(f"%{data.room_type}%"))
+            res_rooms = await db.execute(stmt_rooms)
+            candidate_rooms = res_rooms.scalars().all()
 
-    if not candidate_rooms:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No matching rooms available")
+            if not candidate_rooms:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No matching rooms available")
 
-    # Conflict check
-    stmt_conflicts = select(Reservation).where(
-        Reservation.property_id == data.property_id,
-        Reservation.status.in_(["CONFIRMED", "MODIFIED"])
-    )
-    res_conf = await db.execute(stmt_conflicts)
-    active_conf = res_conf.scalars().all()
+            # Conflict check
+            stmt_conflicts = select(Reservation).where(
+                Reservation.property_id == data.property_id,
+                Reservation.status.in_(["CONFIRMED", "MODIFIED"])
+            )
+            res_conf = await db.execute(stmt_conflicts)
+            active_conf = res_conf.scalars().all()
 
-    occupied_ids = set()
-    for r in active_conf:
-        if not (r.check_out <= data.check_in or r.check_in >= data.check_out):
-            if r.room_id:
-                occupied_ids.add(r.room_id)
+            occupied_ids = set()
+            for r in active_conf:
+                if not (r.check_out <= data.check_in or r.check_in >= data.check_out):
+                    if r.room_id:
+                        occupied_ids.add(r.room_id)
 
-    assigned_room = next((rm for rm in candidate_rooms if rm.id not in occupied_ids), None)
-    if not assigned_room:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="No vacancy for requested room and date range")
+            assigned_room = next((rm for rm in candidate_rooms if rm.id not in occupied_ids), None)
+            if not assigned_room:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="No vacancy for requested room and date range")
 
-    # Rate calculation
-    rate = assigned_room.price_per_night
-    if data.rate_plan_id:
-        stmt_rp = select(RatePlan).where(RatePlan.id == data.rate_plan_id)
-        res_rp = await db.execute(stmt_rp)
-        rp = res_rp.scalar_one_or_none()
-        if rp:
-            rate = rp.price_per_night
+            # Validate guest count against room capacity
+            if assigned_room.max_occupancy and guest_count > assigned_room.max_occupancy:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"guest_count ({guest_count}) exceeds room maximum capacity of {assigned_room.max_occupancy}"
+                )
 
-    total_amount = round(rate * num_nights, 2)
-    res_id = str(uuid.uuid4())
-    reservation = Reservation(
-        id=res_id,
-        organization_id=org_id,
-        property_id=data.property_id,
-        room_id=assigned_room.id,
-        rate_plan_id=data.rate_plan_id,
-        customer_name=data.customer_name,
-        customer_email=data.customer_email,
-        check_in=data.check_in,
-        check_out=data.check_out,
-        total_amount=total_amount,
-        status="CONFIRMED",
-        special_requests=data.special_requests
-    )
-    db.add(reservation)
-    await db.commit()
-    await db.refresh(reservation)
-    return reservation
+            # Rate calculation
+            rate = assigned_room.price_per_night
+            if data.rate_plan_id:
+                stmt_rp = select(RatePlan).where(RatePlan.id == data.rate_plan_id)
+                res_rp = await db.execute(stmt_rp)
+                rp = res_rp.scalar_one_or_none()
+                if rp:
+                    rate = rp.price_per_night
+
+            total_amount = round(rate * num_nights, 2)
+            res_id = str(uuid.uuid4())
+            reservation = Reservation(
+                id=res_id,
+                organization_id=org_id,
+                property_id=data.property_id,
+                room_id=assigned_room.id,
+                rate_plan_id=data.rate_plan_id,
+                customer_name=data.customer_name,
+                customer_email=data.customer_email,
+                check_in=data.check_in,
+                check_out=data.check_out,
+                total_amount=total_amount,
+                status="CONFIRMED",
+                special_requests=data.special_requests
+            )
+            db.add(reservation)
+            await db.commit()
+            await db.refresh(reservation)
+
+            # Send confirmation email on successful booking
+            try:
+                email_service = EmailDeliveryService()
+                await email_service.send_transactional_email(
+                    to_email=reservation.customer_email,
+                    subject=f"Reservation Confirmation - {reservation.id}",
+                    html_content=f"<h2>Booking Confirmed</h2><p>Dear {reservation.customer_name}, your booking {reservation.id} for room {assigned_room.room_number} from {reservation.check_in} to {reservation.check_out} is confirmed.</p><p>Total: ${reservation.total_amount:.2f}</p>"
+                )
+            except Exception as e:
+                import logging
+                logging.getLogger("hospitality_agent_cloud.booking").warning(f"Could not dispatch confirmation email: {e}")
+
+            return reservation
+    except RuntimeError as e:
+        if "LockAcquisitionTimeout" in str(e):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Room inventory is currently locked by a concurrent booking transaction")
+        raise
 
 @router.get("/api/v1/reservations/{reservation_id}")
 async def get_reservation(reservation_id: str, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):

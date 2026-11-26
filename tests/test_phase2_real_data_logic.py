@@ -2,6 +2,7 @@ import pytest
 import io
 import os
 import uuid
+from datetime import datetime, timezone, date, timedelta
 from httpx import AsyncClient, ASGITransport
 from sqlalchemy import delete
 from apps.api.main import app
@@ -293,6 +294,8 @@ async def test_transactional_booking_and_double_booking_prevention():
 
     # Seed exactly one room
     async with AsyncSessionLocal() as session:
+        await session.execute(delete(Reservation).where(Reservation.property_id == prop_id))
+        await session.execute(delete(Room).where(Room.property_id == prop_id))
         room = Room(
             id=str(uuid.uuid4()),
             organization_id=org_id,
@@ -305,14 +308,21 @@ async def test_transactional_booking_and_double_booking_prevention():
         session.add(room)
         await session.commit()
 
-    # Book room for Oct 10 to Oct 15
+    # Book room for future dates
+    d1 = (date.today() + timedelta(days=10)).isoformat()
+    d2 = (date.today() + timedelta(days=15)).isoformat()
+    d_conflict1 = (date.today() + timedelta(days=12)).isoformat()
+    d_conflict2 = (date.today() + timedelta(days=14)).isoformat()
+    d_avail1 = (date.today() + timedelta(days=16)).isoformat()
+    d_avail2 = (date.today() + timedelta(days=18)).isoformat()
+
     res1 = await registry.execute_tool(
         "create_booking",
         {
             "customer_name": "First Guest",
             "customer_email": "first@guest.com",
-            "check_in": "2026-10-10",
-            "check_out": "2026-10-15",
+            "check_in": d1,
+            "check_out": d2,
             "room_type": "Deluxe Ocean View"
         },
         organization_id=org_id,
@@ -323,14 +333,14 @@ async def test_transactional_booking_and_double_booking_prevention():
     assert res1["result"]["status"] == "CONFIRMED"
     assert res1["result"]["total_price"] == 1500.0  # 5 nights * 300.0
 
-    # Attempt overlapping booking for same room type (Oct 12 to Oct 14) -> NO_VACANCY
+    # Attempt overlapping booking for same room type -> NO_VACANCY
     res2 = await registry.execute_tool(
         "create_booking",
         {
             "customer_name": "Conflicting Guest",
             "customer_email": "second@guest.com",
-            "check_in": "2026-10-12",
-            "check_out": "2026-10-14",
+            "check_in": d_conflict1,
+            "check_out": d_conflict2,
             "room_type": "Deluxe Ocean View"
         },
         organization_id=org_id,
@@ -340,14 +350,14 @@ async def test_transactional_booking_and_double_booking_prevention():
     assert res2["success"] is False
     assert res2["status"] == "NO_VACANCY"
 
-    # Non-overlapping booking (Oct 16 to Oct 18) -> SUCCESS
+    # Non-overlapping booking -> SUCCESS
     res3 = await registry.execute_tool(
         "create_booking",
         {
             "customer_name": "Third Guest",
             "customer_email": "third@guest.com",
-            "check_in": "2026-10-16",
-            "check_out": "2026-10-18",
+            "check_in": d_avail1,
+            "check_out": d_avail2,
             "room_type": "Deluxe Ocean View"
         },
         organization_id=org_id,
