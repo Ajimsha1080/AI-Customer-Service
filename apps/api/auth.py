@@ -682,6 +682,23 @@ async def get_optional_current_user(
     except Exception:
         return None
 
+PERMISSION_CATALOGUE: set = {
+    "org:read", "org:write",
+    "property:read", "property:write",
+    "agent:read", "agent:write",
+    "knowledge:read", "knowledge:write",
+    "billing:read", "billing:write",
+    "users:read", "users:write",
+    "audit:read",
+    "sso:manage", "scim:manage",
+    "support:grant_access",
+    "conversations:read", "conversations:write",
+    "analytics:read",
+    "roles:manage",
+    "api_keys:manage",
+    "webhooks:manage"
+}
+
 ROLE_PERMISSIONS: Dict[str, set] = {
     "SUPER_ADMIN": {"*"},
     "OWNER": {

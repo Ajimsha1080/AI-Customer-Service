@@ -13,7 +13,7 @@ from services.database.models import (
     User, Agent, AgentStatus, AgentConfig, UserRole, Conversation, Message,
     SupportTicket, ConversationStatus
 )
-from apps.api.auth import get_current_user, verify_tenant_access, ROLE_HIERARCHY, create_guest_session_token, decode_guest_session_token
+from apps.api.auth import get_current_user, require_permission, verify_tenant_access, ROLE_HIERARCHY, create_guest_session_token, decode_guest_session_token
 from packages.agent_sdk.sdk import HospitalityAgentSDK
 from services.agent_runtime.engine import AgentRuntimeEngine
 from services.billing.metering import SaaSMeteringService
@@ -109,7 +109,7 @@ async def _verify_and_get_agent(agent_id: str, current_user: User, db: AsyncSess
     return agent
 
 @router.post("")
-async def create_agent(req: CreateAgentRequest, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def create_agent(req: CreateAgentRequest, current_user: User = Depends(require_permission("agent:write")), db: AsyncSession = Depends(get_db)):
     org_id = verify_tenant_access(current_user, req.organization_id)
     normalized_type = req.agent_type.upper()
     if normalized_type not in VALID_AGENT_TYPES:
@@ -163,7 +163,7 @@ async def create_agent(req: CreateAgentRequest, current_user: User = Depends(get
     return agent
 
 @router.put("/{agent_id}")
-async def update_agent(agent_id: str, req: UpdateAgentConfigRequest, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def update_agent(agent_id: str, req: UpdateAgentConfigRequest, current_user: User = Depends(require_permission("agent:write")), db: AsyncSession = Depends(get_db)):
     agt = await _verify_and_get_agent(agent_id, current_user, db, require_mutation=True)
     
     if req.name:
@@ -270,22 +270,22 @@ async def validate_agent(agent_id: str, current_user: User = Depends(get_current
     return {"agent_id": agent_id, "is_valid": valid, "message": msg}
 
 @router.post("/{agent_id}/deploy")
-async def deploy_agent(agent_id: str, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def deploy_agent(agent_id: str, current_user: User = Depends(require_permission("agent:write")), db: AsyncSession = Depends(get_db)):
     await _verify_and_get_agent(agent_id, current_user, db, require_mutation=True)
     return await agent_sdk.deployAgent(agent_id)
 
 @router.post("/{agent_id}/pause")
-async def pause_agent(agent_id: str, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def pause_agent(agent_id: str, current_user: User = Depends(require_permission("agent:write")), db: AsyncSession = Depends(get_db)):
     await _verify_and_get_agent(agent_id, current_user, db, require_mutation=True)
     return await agent_sdk.pauseAgent(agent_id)
 
 @router.post("/{agent_id}/resume")
-async def resume_agent(agent_id: str, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def resume_agent(agent_id: str, current_user: User = Depends(require_permission("agent:write")), db: AsyncSession = Depends(get_db)):
     await _verify_and_get_agent(agent_id, current_user, db, require_mutation=True)
     return await agent_sdk.resumeAgent(agent_id)
 
 @router.post("/{agent_id}/disable")
-async def disable_agent(agent_id: str, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def disable_agent(agent_id: str, current_user: User = Depends(require_permission("agent:write")), db: AsyncSession = Depends(get_db)):
     await _verify_and_get_agent(agent_id, current_user, db, require_mutation=True)
     return await agent_sdk.disableAgent(agent_id)
 

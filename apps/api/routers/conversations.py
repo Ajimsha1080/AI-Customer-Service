@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from services.database.session import get_db
 from services.database.models import User, Conversation, Message, ConversationStatus, UserRole
-from apps.api.auth import get_current_user, verify_tenant_access
+from apps.api.auth import get_current_user, require_permission, verify_tenant_access
 from services.database.pagination import paginate_query
 
 router = APIRouter(prefix="/api/v1/conversations", tags=["Staff Inbox & Conversations"])
@@ -60,7 +60,7 @@ from services.realtime.broadcaster import realtime_hub
 async def takeover_conversation(
     conversation_id: str,
     req: HumanTakeoverRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("conversations:write")),
     db: AsyncSession = Depends(get_db)
 ):
     """0.4 Conversation Takeover: Staff ID derived from authenticated principal, 404 for foreign conversations."""
@@ -130,7 +130,7 @@ async def get_conversation_messages(
 async def send_staff_message(
     conversation_id: str,
     req: StaffReplyRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("conversations:write")),
     db: AsyncSession = Depends(get_db)
 ):
     """Staff inbox reply endpoint: persists message from staff into conversation history and relays via pubsub."""

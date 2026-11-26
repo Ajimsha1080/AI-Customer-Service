@@ -6,9 +6,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from services.database.session import get_db
-from services.database.models import User, CustomRole
+from services.database.models import User, CustomRole, UserRole
 from services.database.audit import record_audit_log_async
-from apps.api.auth import get_current_user, require_permission
+from apps.api.auth import (
+    get_current_user, require_permission, PERMISSION_CATALOGUE, get_user_permissions
+)
 
 router = APIRouter(prefix="/api/v1/roles", tags=["Custom Roles"])
 
@@ -48,7 +50,26 @@ async def create_custom_role(
     current_user: User = Depends(require_permission("roles:manage")),
     db: AsyncSession = Depends(get_db)
 ):
-    """Creates a new granular custom role within the organization."""
+    """Creates a new granular custom role within the organization.
+    Restricts permissions to permission catalogue, rejecting wildcard '*' and permissions above creator's own.
+    """
+    if not req.permissions:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="At least one permission required.")
+
+    creator_perms = await get_user_permissions(current_user, db)
+
+    for p in req.permissions:
+        if p not in PERMISSION_CATALOGUE or p == "*":
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Invalid permission: '{p}'. Must be a valid entry from the permission catalogue (wildcards forbidden)."
+            )
+        if current_user.role != UserRole.SUPER_ADMIN and p not in creator_perms and "*" not in creator_perms:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Cannot grant permission '{p}' which exceeds creator's own assigned permissions."
+            )
+
     role_id = str(uuid.uuid4())
     custom_role = CustomRole(
         id=role_id,
@@ -97,6 +118,18 @@ async def update_custom_role(
     if req.description is not None:
         custom_role.description = req.description
     if req.permissions is not None:
+        creator_perms = await get_user_permissions(current_user, db)
+        for p in req.permissions:
+            if p not in PERMISSION_CATALOGUE or p == "*":
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Invalid permission: '{p}'. Must be a valid entry from the permission catalogue (wildcards forbidden)."
+                )
+            if current_user.role != UserRole.SUPER_ADMIN and p not in creator_perms and "*" not in creator_perms:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"Cannot grant permission '{p}' which exceeds creator's own assigned permissions."
+                )
         custom_role.permissions = req.permissions
 
     await db.flush()
