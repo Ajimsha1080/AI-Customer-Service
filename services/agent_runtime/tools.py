@@ -1,5 +1,7 @@
 import json
 import uuid
+import re
+import logging
 from typing import Dict, Any, List, Optional
 from datetime import datetime, date
 from sqlalchemy import select, and_, or_
@@ -8,6 +10,30 @@ from services.database.session import AsyncSessionLocal
 from services.database.models import (
     Property, Room, Facility, LiveUpdate, Reservation, Restaurant, Activity, Conversation, DataAccessPolicy, SupportTicket, Resident, RatePlan
 )
+
+logger = logging.getLogger("hospitality_agent_cloud.agent_runtime.tools")
+
+def redact_sensitive_values(data: Any) -> Any:
+    """Redacts credit card numbers, passwords, API keys, and bearer tokens from tool arguments/results for safe logging."""
+    if isinstance(data, str):
+        # 13-16 digit card numbers
+        res = re.sub(r'\b(?:\d[ -]*?){13,16}\b', '[REDACTED_CARD]', data)
+        # Bearer / JWT tokens
+        res = re.sub(r'Bearer\s+[A-Za-z0-9\-_.]+', 'Bearer [REDACTED_TOKEN]', res, flags=re.IGNORECASE)
+        # Passwords / secrets
+        res = re.sub(r'(?i)(password|secret|token|api_key)\s*[:=]\s*["\']?[^"\'\s]+["\']?', r'\1=[REDACTED]', res)
+        return res
+    elif isinstance(data, dict):
+        redacted = {}
+        for k, v in data.items():
+            if any(term in k.lower() for term in ("password", "secret", "token", "key", "card", "cvv", "auth")):
+                redacted[k] = "[REDACTED]"
+            else:
+                redacted[k] = redact_sensitive_values(v)
+        return redacted
+    elif isinstance(data, list):
+        return [redact_sensitive_values(x) for x in data]
+    return data
 
 CATEGORY_ALIASES = {
     "resident_profile": "resident_room_info",
@@ -310,12 +336,26 @@ class HospitalityToolRegistry:
         if tool_name in name_map:
             normalized_name = name_map[tool_name]
 
-        # Check authorization (accept both camelCase and snake_case in enabled_tools or allow all if empty)
-        if enabled_tools and tool_name not in enabled_tools and normalized_name not in enabled_tools:
+        # Check authorization: tool MUST belong to agent's configured enabled_tools
+        if not enabled_tools or (tool_name not in enabled_tools and normalized_name not in enabled_tools):
+            logger.warning(f"Tool execution rejected: '{tool_name}' is not among configured enabled_tools: {enabled_tools}")
             return {
                 "success": False,
-                "error": f"Tool '{tool_name}' is not enabled for this agent. Authorized tools: {enabled_tools}"
+                "tool": tool_name,
+                "error": f"Tool '{tool_name}' is not enabled for this agent."
             }
+
+        # Parameter validation: tool_args must be a dictionary
+        if not isinstance(tool_args, dict):
+            return {
+                "success": False,
+                "tool": tool_name,
+                "error": "Invalid tool parameters: arguments must be a key-value object."
+            }
+
+        # Safe logging with sensitive data redaction
+        safe_args = redact_sensitive_values(tool_args)
+        logger.info(f"Executing tool '{normalized_name}' [org={organization_id}, prop={property_id}] args={safe_args}")
 
         # --- ERP / LIVE DATA ACCESS CONTROL ENFORCEMENT ---
         category_key = TOOL_CATEGORY_MAP.get(normalized_name) or TOOL_CATEGORY_MAP.get(tool_name)
@@ -381,9 +421,17 @@ class HospitalityToolRegistry:
             if isinstance(result, dict) and result.get("success") is False:
                 return {"success": False, "tool": tool_name, "error": result.get("error", "Tool execution failed"), "status": result.get("status")}
 
+            safe_result = redact_sensitive_values(result)
+            logger.info(f"Tool '{normalized_name}' completed: {safe_result}")
             return {"success": True, "tool": tool_name, "result": result}
         except Exception as e:
-            return {"success": False, "tool": tool_name, "error": str(e)}
+            logger.error(f"Internal error executing tool '{tool_name}' for org={organization_id} prop={property_id}: {e}", exc_info=True)
+            # Never leak SQL/database errors, table names, or internal exceptions to guests
+            return {
+                "success": False,
+                "tool": tool_name,
+                "error": "I apologize, but I encountered an error retrieving that information. Please try again or ask our staff for assistance."
+            }
 
 
     # --- EXPLICIT HOSTEL AI AGENT TOOL IMPLEMENTATIONS ---
