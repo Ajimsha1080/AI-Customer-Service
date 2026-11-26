@@ -4,8 +4,9 @@ metadata:
   name: hospitality-agent-api
   labels:
     app: hospitality-agent-api
+    app.kubernetes.io/component: api
 spec:
-  replicas: 3
+  replicas: {{ .Values.replicaCount }}
   selector:
     matchLabels:
       app: hospitality-agent-api
@@ -13,51 +14,110 @@ spec:
     metadata:
       labels:
         app: hospitality-agent-api
+        app.kubernetes.io/component: api
     spec:
+      securityContext:
+        runAsUser: {{ .Values.securityContext.runAsUser }}
+        runAsGroup: {{ .Values.securityContext.runAsGroup }}
+        runAsNonRoot: {{ .Values.securityContext.runAsNonRoot }}
       containers:
         - name: api
-          image: ghcr.io/ajimsha1080/ai-customer-service-api:latest
-          imagePullPolicy: Always
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: {{ .Values.securityContext.allowPrivilegeEscalation }}
+            readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
+            capabilities:
+              drop:
+                - ALL
           ports:
-            - containerPort: 8000
+            - containerPort: {{ .Values.service.port }}
           env:
             - name: ENVIRONMENT
-              value: "production"
+              value: "{{ .Values.env.ENVIRONMENT }}"
             - name: PORT
-              value: "8000"
+              value: "{{ .Values.env.PORT }}"
           envFrom:
             - secretRef:
                 name: hospitality-agent-secrets
           resources:
             requests:
-              memory: "512Mi"
-              cpu: "250m"
+              cpu: {{ .Values.resources.requests.cpu }}
+              memory: {{ .Values.resources.requests.memory }}
             limits:
-              memory: "2Gi"
-              cpu: "1000m"
+              cpu: {{ .Values.resources.limits.cpu }}
+              memory: {{ .Values.resources.limits.memory }}
           startupProbe:
             httpGet:
-              path: /health
-              port: 8000
-            failureThreshold: 30
-            periodSeconds: 10
+              path: {{ .Values.probes.startup.path }}
+              port: {{ .Values.probes.startup.port }}
+            failureThreshold: {{ .Values.probes.startup.failureThreshold }}
+            periodSeconds: {{ .Values.probes.startup.periodSeconds }}
           livenessProbe:
             httpGet:
-              path: /health
-              port: 8000
-            initialDelaySeconds: 15
-            periodSeconds: 10
+              path: {{ .Values.probes.liveness.path }}
+              port: {{ .Values.probes.liveness.port }}
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
           readinessProbe:
             httpGet:
-              path: /ready
-              port: 8000
-            initialDelaySeconds: 5
-            periodSeconds: 5
+              path: {{ .Values.probes.readiness.path }}
+              port: {{ .Values.probes.readiness.port }}
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
           lifecycle:
             preStop:
               exec:
                 command: ["/bin/sh", "-c", "sleep 10"]
       terminationGracePeriodSeconds: 30
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hospitality-agent-worker
+  labels:
+    app: hospitality-agent-worker
+    app.kubernetes.io/component: worker
+spec:
+  replicas: {{ .Values.worker.replicaCount }}
+  selector:
+    matchLabels:
+      app: hospitality-agent-worker
+  template:
+    metadata:
+      labels:
+        app: hospitality-agent-worker
+        app.kubernetes.io/component: worker
+    spec:
+      securityContext:
+        runAsUser: {{ .Values.worker.securityContext.runAsUser }}
+        runAsGroup: {{ .Values.worker.securityContext.runAsGroup }}
+        runAsNonRoot: {{ .Values.worker.securityContext.runAsNonRoot }}
+      containers:
+        - name: worker
+          image: "{{ .Values.worker.image.repository }}:{{ .Values.worker.image.tag }}"
+          imagePullPolicy: {{ .Values.worker.image.pullPolicy }}
+          command: ["python", "-m", "services.operations.worker"]
+          securityContext:
+            allowPrivilegeEscalation: {{ .Values.worker.securityContext.allowPrivilegeEscalation }}
+            readOnlyRootFilesystem: {{ .Values.worker.securityContext.readOnlyRootFilesystem }}
+            capabilities:
+              drop:
+                - ALL
+          env:
+            - name: ENVIRONMENT
+              value: "{{ .Values.env.ENVIRONMENT }}"
+          envFrom:
+            - secretRef:
+                name: hospitality-agent-secrets
+          resources:
+            requests:
+              cpu: {{ .Values.worker.resources.requests.cpu }}
+              memory: {{ .Values.worker.resources.requests.memory }}
+            limits:
+              cpu: {{ .Values.worker.resources.limits.cpu }}
+              memory: {{ .Values.worker.resources.limits.memory }}
+      terminationGracePeriodSeconds: 60
 ---
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
@@ -68,12 +128,18 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: hospitality-agent-api
-  minReplicas: 3
-  maxReplicas: 20
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
   metrics:
     - type: Resource
       resource:
         name: cpu
         target:
           type: Utilization
-          averageUtilization: 75
+          averageUtilization: {{ .Values.autoscaling.targetCPUUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.targetMemoryUtilizationPercentage }}

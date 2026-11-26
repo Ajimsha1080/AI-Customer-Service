@@ -3,8 +3,29 @@ replicaCount: 3
 image:
   repository: ghcr.io/ajimsha1080/ai-customer-service-api
   pullPolicy: IfNotPresent
-  # Overridden by CI git SHA tag
   tag: "latest"
+
+worker:
+  replicaCount: 3
+  image: ghcr.io/ajimsha1080/ai-customer-service-api
+  pullPolicy: IfNotPresent
+  tag: "latest"
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 2Gi
+  securityContext:
+    runAsUser: 10001
+    runAsGroup: 10001
+    runAsNonRoot: true
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: false
+    capabilities:
+      drop:
+        - ALL
 
 webImage:
   repository: ghcr.io/ajimsha1080/ai-customer-service-web
@@ -53,8 +74,42 @@ resources:
     cpu: 1000m
     memory: 2Gi
 
+securityContext:
+  runAsUser: 10001
+  runAsGroup: 10001
+  runAsNonRoot: true
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
+  capabilities:
+    drop:
+      - ALL
+
 podDisruptionBudget:
   minAvailable: 2
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 20
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+probes:
+  liveness:
+    path: /health/live
+    port: 8000
+    initialDelaySeconds: 15
+    periodSeconds: 10
+  readiness:
+    path: /health/ready
+    port: 8000
+    initialDelaySeconds: 5
+    periodSeconds: 5
+  startup:
+    path: /health/startup
+    port: 8000
+    failureThreshold: 30
+    periodSeconds: 10
 
 migrationJob:
   enabled: true

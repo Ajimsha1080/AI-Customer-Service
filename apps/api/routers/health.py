@@ -21,6 +21,26 @@ async def health_check():
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
+@router.get("/health/live")
+async def liveness_check():
+    """Liveness probe: verifies process is alive and responsive."""
+    return {
+        "status": "alive",
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+
+@router.get("/health/startup")
+async def startup_check(db: AsyncSession = Depends(get_db)):
+    """Startup probe: verifies database connectivity before traffic routing."""
+    try:
+        await db.execute(text("SELECT 1"))
+        return {"status": "started", "timestamp": datetime.now(timezone.utc).isoformat()}
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Startup check failed: {str(e)}"
+        )
+
 @router.get("/.well-known/security.txt")
 async def security_txt():
     """RFC 9116 Vulnerability Disclosure Policy file."""
@@ -36,6 +56,7 @@ async def security_txt():
     return Response(content=content, media_type="text/plain; charset=utf-8")
 
 @router.get("/ready")
+@router.get("/health/ready")
 async def readiness_check(db: AsyncSession = Depends(get_db)):
     """Readiness probe that actually pings DB, Redis, and Vector Store."""
     # 1. Real DB Ping
