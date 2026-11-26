@@ -82,6 +82,9 @@ app.add_middleware(PrometheusMetricsMiddleware)
 from apps.api.middleware.security_headers import SecurityHeadersMiddleware
 app.add_middleware(SecurityHeadersMiddleware)
 
+from apps.api.middleware.tracing import TracingAndLoggingMiddleware, setup_opentelemetry
+app.add_middleware(TracingAndLoggingMiddleware)
+
 # --- CORS MIDDLEWARE HARDENING ---
 app.add_middleware(
     CORSMiddleware,
@@ -89,39 +92,10 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
-    expose_headers=["X-Request-ID", "X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset", "Retry-After", "X-Audit-Chain-Verified", "X-Verified-Record-Count"],
+    expose_headers=["X-Request-ID", "X-Trace-ID", "X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset", "Retry-After", "X-Audit-Chain-Verified", "X-Verified-Record-Count"],
 )
 
-# --- REQUEST ID & STRUCTURED LOGGING MIDDLEWARE ---
-import re
-
-@app.middleware("http")
-async def request_id_and_logging_middleware(request: Request, call_next):
-    raw_request_id = request.headers.get("X-Request-ID", "").strip()
-    if raw_request_id and re.match(r"^[a-zA-Z0-9_\-]{1,64}$", raw_request_id):
-        request_id = raw_request_id
-    else:
-        request_id = f"req_{uuid.uuid4().hex[:12]}"
-    request.state.request_id = request_id
-
-    start_time = time.time()
-    response = await call_next(request)
-    latency_ms = round((time.time() - start_time) * 1000, 2)
-
-    response.headers["X-Request-ID"] = request_id
-    if getattr(request.state, "is_support_impersonation", False):
-        response.headers["X-Support-Impersonation"] = "Active"
-
-    log_entry = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "request_id": request_id,
-        "method": request.method,
-        "path": request.url.path,
-        "status_code": response.status_code,
-        "latency_ms": latency_ms
-    }
-    logger.info(json.dumps(log_entry))
-    return response
+setup_opentelemetry(app)
 
 # --- ERROR HANDLERS ---
 @app.exception_handler(HTTPException)
