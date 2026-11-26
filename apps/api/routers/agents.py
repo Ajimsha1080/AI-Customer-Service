@@ -23,8 +23,46 @@ from services.database.pagination import paginate_query
 from services.resilience.tenant_limiter import tenant_limiter
 
 router = APIRouter(prefix="/api/v1/agents", tags=["Control Plane - Agents"])
+public_router = APIRouter(prefix="/api/v1/public", tags=["Public - Agents"])
 agent_sdk = HospitalityAgentSDK()
 metering_service = SaaSMeteringService()
+
+@public_router.get("/agents/{agent_id}")
+@limiter.limit("60/minute")
+async def get_public_agent(request: Request, agent_id: str, db: AsyncSession = Depends(get_db)):
+    stmt = select(Agent).where(Agent.id == agent_id)
+    res = await db.execute(stmt)
+    agent = res.scalar_one_or_none()
+    if not agent:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Agent '{agent_id}' not found."
+        )
+    if agent.status != AgentStatus.ACTIVE:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Agent '{agent_id}' is not active."
+        )
+
+    cfg_stmt = select(AgentConfig).where(AgentConfig.agent_id == agent_id)
+    cfg_res = await db.execute(cfg_stmt)
+    config = cfg_res.scalar_one_or_none()
+
+    return {
+        "id": agent.id,
+        "name": agent.name,
+        "display_name": agent.name,
+        "greeting": config.greeting if (config and config.greeting) else "Welcome! How can I assist you today?",
+        "primary_language": "English",
+        "languages": ["English", "Hindi", "Malayalam", "Tamil", "Telugu", "Kannada"],
+        "supported_languages": ["English", "Hindi", "Malayalam", "Tamil", "Telugu", "Kannada"],
+        "branding": {
+            "name": agent.name,
+            "tone": "Friendly, Professional, Courteous",
+            "agent_type": agent.agent_type.value if hasattr(agent.agent_type, "value") else str(agent.agent_type),
+            "theme_color": "#0f172a"
+        }
+    }
 
 class CreateAgentRequest(BaseModel):
     organization_id: str

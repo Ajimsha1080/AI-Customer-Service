@@ -140,6 +140,7 @@ const PLACEHOLDERS: Record<string, string> = {
 export default function ResidentHostelAssistantPage({ params }: { params?: { agent_id?: string } }) {
   const agentId = params?.agent_id || '';
   const [conversationId, setConversationId] = useState<string | null>(null);
+  const [guestToken, setGuestToken] = useState<string | null>(null);
   const [mode, setMode] = useState<'chat' | 'voice'>('chat');
   const [voiceState, setVoiceState] = useState<'idle' | 'listening' | 'thinking' | 'speaking'>('idle');
   const [language, setLanguage] = useState('English');
@@ -154,20 +155,32 @@ export default function ResidentHostelAssistantPage({ params }: { params?: { age
   const [isLoading, setIsLoading] = useState(false);
   const [statusNotice, setStatusNotice] = useState<string | null>(null);
 
-  // Load agent details
+  // Restore guest session from sessionStorage
+  useEffect(() => {
+    if (typeof window !== 'undefined' && agentId) {
+      const savedConv = sessionStorage.getItem(`guest_conv_${agentId}`);
+      const savedToken = sessionStorage.getItem(`guest_token_${agentId}`);
+      if (savedConv) setConversationId(savedConv);
+      if (savedToken) setGuestToken(savedToken);
+    }
+  }, [agentId]);
+
+  // Load public agent details
   useEffect(() => {
     async function loadAgentDetails() {
       if (!agentId) return;
       try {
-        const res = await fetch(`${API_BASE}/api/v1/agents/${agentId}`);
+        const res = await fetch(`${API_BASE}/api/v1/public/agents/${agentId}`);
         if (res.ok) {
           const data = await res.json();
-          setPropertyTitle(data.name || 'AI Concierge');
-          if (data.config?.greeting) {
-            setMessages([{ sender: 'agent', text: data.config.greeting }]);
+          setPropertyTitle(data.display_name || data.name || 'AI Concierge');
+          if (data.greeting) {
+            setMessages([{ sender: 'agent', text: data.greeting }]);
           }
         }
-      } catch {}
+      } catch (err) {
+        console.warn("Public agent info lookup failed:", err);
+      }
     }
     loadAgentDetails();
   }, [agentId]);
@@ -211,27 +224,46 @@ export default function ResidentHostelAssistantPage({ params }: { params?: { age
   const sendVoiceMessage = async (queryText: string): Promise<string | null> => {
     const activeLang = languageRef.current || language;
     try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (guestToken) {
+        headers['x-guest-token'] = guestToken;
+      }
       const res = await fetch(getApiEndpoint(), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: headers,
         body: JSON.stringify({
           message: activeLang !== 'English' ? `[Language: ${activeLang}] ${queryText}` : queryText,
           channel: 'voice_session',
           language: activeLang,
-          conversation_id: conversationId || undefined
+          conversation_id: conversationId || undefined,
+          guest_token: guestToken || undefined
         })
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const errorMsg = data.detail || (data.error && data.error.message) || `Error (${res.status}): Failed to send message.`;
+        setMessages(prev => [...prev, { sender: 'user', text: queryText }, { sender: 'agent', text: errorMsg }]);
+        return errorMsg;
+      }
       if (data.conversation_id) {
         setConversationId(data.conversation_id);
+        if (typeof sessionStorage !== 'undefined') {
+          sessionStorage.setItem(`guest_conv_${agentId}`, data.conversation_id);
+        }
       }
-      setMessages(prev => [...prev, { sender: 'user', text: queryText }, { sender: 'agent', text: data.response }]);
+      if (data.guest_token) {
+        setGuestToken(data.guest_token);
+        if (typeof sessionStorage !== 'undefined') {
+          sessionStorage.setItem(`guest_token_${agentId}`, data.guest_token);
+        }
+      }
+      setMessages(prev => [...prev, { sender: 'user', text: queryText }, { sender: 'agent', text: data.response || 'Message received.' }]);
       return data.response;
-    } catch (e) {
+    } catch (e: any) {
       console.error("Voice execution error:", e);
-      const fb = FALLBACK_RESPONSES[activeLang] || FALLBACK_RESPONSES.English;
-      setMessages(prev => [...prev, { sender: 'user', text: queryText }, { sender: 'agent', text: fb }]);
-      return fb;
+      const errMsg = `Connection error: ${e.message || 'Unable to connect to assistant.'}`;
+      setMessages(prev => [...prev, { sender: 'user', text: queryText }, { sender: 'agent', text: errMsg }]);
+      return errMsg;
     }
   };
 
@@ -361,30 +393,43 @@ export default function ResidentHostelAssistantPage({ params }: { params?: { age
     setIsLoading(true);
 
     try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (guestToken) {
+        headers['x-guest-token'] = guestToken;
+      }
       const res = await fetch(getApiEndpoint(), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: headers,
         body: JSON.stringify({
           message: activeLang !== 'English' ? `[Language: ${activeLang}] ${msgToSend}` : msgToSend,
           channel: 'web_widget',
           language: activeLang,
-          conversation_id: conversationId || undefined
+          conversation_id: conversationId || undefined,
+          guest_token: guestToken || undefined
         })
       });
 
+      const data = await res.json().catch(() => ({}));
       if (res.ok) {
-        const data = await res.json();
         if (data.conversation_id) {
           setConversationId(data.conversation_id);
+          if (typeof sessionStorage !== 'undefined') {
+            sessionStorage.setItem(`guest_conv_${agentId}`, data.conversation_id);
+          }
         }
-        setMessages(prev => [...prev, { sender: 'agent', text: data.response }]);
+        if (data.guest_token) {
+          setGuestToken(data.guest_token);
+          if (typeof sessionStorage !== 'undefined') {
+            sessionStorage.setItem(`guest_token_${agentId}`, data.guest_token);
+          }
+        }
+        setMessages(prev => [...prev, { sender: 'agent', text: data.response || 'Message received.' }]);
       } else {
-        const fb = FALLBACK_RESPONSES[activeLang] || FALLBACK_RESPONSES.English;
-        setMessages(prev => [...prev, { sender: 'agent', text: fb }]);
+        const errorDetail = data.detail || (data.error && data.error.message) || `Error (${res.status}): Failed to send message.`;
+        setMessages(prev => [...prev, { sender: 'agent', text: errorDetail }]);
       }
-    } catch (err) {
-      const fb = FALLBACK_RESPONSES[activeLang] || FALLBACK_RESPONSES.English;
-      setMessages(prev => [...prev, { sender: 'agent', text: fb }]);
+    } catch (err: any) {
+      setMessages(prev => [...prev, { sender: 'agent', text: `Network error: ${err.message || 'Unable to connect to assistant.'}` }]);
     } finally {
       setIsLoading(false);
     }
