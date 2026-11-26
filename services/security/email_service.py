@@ -8,8 +8,16 @@ import httpx
 
 logger = logging.getLogger("hospitality_agent_cloud.security.email")
 
-# Email suppression list for bounces and complaints
+# Email suppression list for bounces and complaints backed by Redis
+SUPPRESSION_REDIS_KEY = "hac:email_suppression_list"
 _SUPPRESSED_EMAILS: Set[str] = set()
+
+def _get_sync_redis():
+    try:
+        from services.common.redis_service import get_redis_client_sync
+        return get_redis_client_sync()
+    except Exception:
+        return None
 
 class EmailProviderBase:
     async def send(self, to_email: str, subject: str, text_content: str, html_content: str, sender: str) -> bool:
@@ -192,7 +200,7 @@ class EmailDeliveryService:
     ) -> bool:
         """Dispatches an email with retry logic and suppression checking."""
         clean_email = to_email.lower().strip()
-        if clean_email in _SUPPRESSED_EMAILS:
+        if self.is_suppressed(clean_email):
             logger.warning(f"[EmailDelivery] Delivery skipped: {clean_email} is on suppression list (bounced/complaint).")
             return False
 
@@ -225,15 +233,29 @@ class EmailDeliveryService:
         return False
 
     def record_bounce(self, email: str, reason: str = "bounce"):
-        """Adds email to suppression list."""
+        """Adds email to suppression list in Redis."""
         clean = email.lower().strip()
         _SUPPRESSED_EMAILS.add(clean)
+        r = _get_sync_redis()
+        if r:
+            try:
+                r.sadd(SUPPRESSION_REDIS_KEY, clean)
+            except Exception as e:
+                logger.warning(f"Failed to record bounce to Redis: {e}")
         logger.warning(f"[EmailDelivery] Recorded {reason} for {clean}; email suppressed from future dispatches.")
 
     def record_complaint(self, email: str):
         self.record_bounce(email, reason="complaint")
 
     def is_suppressed(self, email: str) -> bool:
-        return email.lower().strip() in _SUPPRESSED_EMAILS
+        clean = email.lower().strip()
+        r = _get_sync_redis()
+        if r:
+            try:
+                if r.sismember(SUPPRESSION_REDIS_KEY, clean):
+                    return True
+            except Exception as e:
+                logger.warning(f"Failed to check suppression from Redis: {e}")
+        return clean in _SUPPRESSED_EMAILS
 
 email_service = EmailDeliveryService()

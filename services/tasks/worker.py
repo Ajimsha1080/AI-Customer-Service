@@ -9,8 +9,12 @@ from typing import Dict, Any, Optional
 
 from apps.api.config import settings
 
+from services.common.redis_service import get_redis_client
+
 logger = logging.getLogger("hospitality_agent_cloud.worker")
 QUEUE_KEY = "hac:task_queue"
+DLQ_KEY = "hac:dead_letter_queue"
+PROCESSED_SET_KEY = "hac:processed_jobs"
 
 # --- ASYNC WORKER TASK DEFINITIONS ---
 
@@ -196,49 +200,47 @@ QUEUE_KEY = "hac:task_queue"
 DLQ_KEY = "hac:task_queue:dlq"
 
 # In-memory DLQ store for testing / local fallback: job_id -> envelope
+# Local fallback dict only used in testing when Redis is mocked out or unavailable
 LOCAL_DLQ: Dict[str, Dict[str, Any]] = {}
 PROCESSED_JOB_KEYS: set = set()
 
 async def push_to_dlq(envelope: Dict[str, Any], error_reason: str):
-    """Pushes a permanently failed job to the Dead-Letter Queue."""
+    """Pushes a permanently failed job to the Dead-Letter Queue in Redis."""
     envelope["failed_at"] = datetime.now(timezone.utc).isoformat()
     envelope["error"] = error_reason
     envelope["status"] = "DEAD_LETTER"
 
     job_id = envelope.get("id")
-    LOCAL_DLQ[job_id] = envelope
 
     try:
-        import redis.asyncio as aioredis
-        client = aioredis.from_url(settings.REDIS_URL, socket_connect_timeout=0.5, decode_responses=True)
+        client = await get_redis_client()
         await client.lpush(DLQ_KEY, json.dumps(envelope))
-        await client.close()
         logger.error(f"[TaskWorker] Job '{job_id}' ({envelope.get('task_name')}) moved to Redis DLQ: {error_reason}")
-    except Exception:
-        logger.error(f"[TaskWorker] Job '{job_id}' ({envelope.get('task_name')}) moved to Local DLQ: {error_reason}")
+    except Exception as e:
+        if settings.is_production:
+            logger.critical(f"[TaskWorker] FATAL: Failed to write to Redis DLQ in production: {e}")
+            raise RuntimeError(f"DLQ storage failure in production: {e}")
+        LOCAL_DLQ[job_id] = envelope
+        logger.error(f"[TaskWorker] Job '{job_id}' ({envelope.get('task_name')}) moved to Local DLQ fallback: {error_reason}")
 
 async def list_dlq_jobs(limit: int = 50) -> list[Dict[str, Any]]:
-    """Inspects pending dead-letter jobs."""
+    """Inspects pending dead-letter jobs from Redis."""
     try:
-        import redis.asyncio as aioredis
-        client = aioredis.from_url(settings.REDIS_URL, socket_connect_timeout=0.5, decode_responses=True)
+        client = await get_redis_client()
         raw_items = await client.lrange(DLQ_KEY, 0, limit - 1)
-        await client.close()
         if raw_items:
             return [json.loads(item) for item in raw_items]
-    except Exception:
-        pass
+    except Exception as e:
+        if settings.is_production:
+            raise RuntimeError(f"Failed to query DLQ in production: {e}")
     return list(LOCAL_DLQ.values())[:limit]
 
 async def replay_dlq_job(job_id: str) -> Optional[Dict[str, Any]]:
     """Replays a job from the DLQ by re-enqueueing it into the primary queue."""
     target_envelope = None
-    if job_id in LOCAL_DLQ:
-        target_envelope = LOCAL_DLQ.pop(job_id)
 
     try:
-        import redis.asyncio as aioredis
-        client = aioredis.from_url(settings.REDIS_URL, socket_connect_timeout=0.5, decode_responses=True)
+        client = await get_redis_client()
         raw_items = await client.lrange(DLQ_KEY, 0, -1)
         for raw in raw_items:
             parsed = json.loads(raw)
@@ -246,9 +248,12 @@ async def replay_dlq_job(job_id: str) -> Optional[Dict[str, Any]]:
                 target_envelope = parsed
                 await client.lrem(DLQ_KEY, 1, raw)
                 break
-        await client.close()
-    except Exception:
-        pass
+    except Exception as e:
+        if settings.is_production:
+            raise RuntimeError(f"Failed to access DLQ in production: {e}")
+
+    if not target_envelope and job_id in LOCAL_DLQ:
+        target_envelope = LOCAL_DLQ.pop(job_id)
 
     if not target_envelope:
         return None
@@ -263,12 +268,21 @@ async def replay_dlq_job(job_id: str) -> Optional[Dict[str, Any]]:
 # --- TASK ENQUEUEING ENGINE ---
 
 async def enqueue_task(task_name: str, payload: Dict[str, Any], max_retries: int = 3, idempotency_key: Optional[str] = None) -> str:
-    """Enqueues a task for asynchronous processing via Redis queue with fallback to background task."""
+    """Enqueues a task for asynchronous processing via Redis queue."""
     task_id = idempotency_key or f"task_{uuid.uuid4().hex[:12]}"
 
-    if task_id in PROCESSED_JOB_KEYS:
-        logger.info(f"[TaskQueue] Job with idempotency key '{task_id}' already processed, skipping.")
-        return task_id
+    client = None
+    try:
+        client = await get_redis_client()
+        if await client.sismember(PROCESSED_SET_KEY, task_id):
+            logger.info(f"[TaskQueue] Job with idempotency key '{task_id}' already processed, skipping.")
+            return task_id
+    except Exception as e:
+        if settings.is_production:
+            raise RuntimeError(f"Failed to access Redis queue in production: {e}")
+        if task_id in PROCESSED_JOB_KEYS:
+            logger.info(f"[TaskQueue] Job with idempotency key '{task_id}' already processed, skipping.")
+            return task_id
 
     task_envelope = {
         "id": task_id,
@@ -279,17 +293,18 @@ async def enqueue_task(task_name: str, payload: Dict[str, Any], max_retries: int
     }
 
     enqueued = False
-    try:
-        import redis.asyncio as aioredis
-        client = aioredis.from_url(settings.REDIS_URL, socket_connect_timeout=0.5, decode_responses=True)
-        await client.lpush(QUEUE_KEY, json.dumps(task_envelope))
-        await client.close()
-        enqueued = True
-        logger.info(f"[TaskQueue] Enqueued '{task_name}' (task_id={task_id}) into Redis queue.")
-    except Exception as e:
-        logger.debug(f"[TaskQueue] Redis unavailable ({e}); falling back to local background task.")
+    if client:
+        try:
+            await client.lpush(QUEUE_KEY, json.dumps(task_envelope))
+            enqueued = True
+            logger.info(f"[TaskQueue] Enqueued '{task_name}' (task_id={task_id}) into Redis queue.")
+        except Exception as e:
+            if settings.is_production:
+                raise RuntimeError(f"Redis enqueue failed in production: {e}")
 
     if not enqueued:
+        if settings.is_production:
+            raise RuntimeError("Cannot execute background tasks in-process in production.")
         fn = TASK_REGISTRY.get(task_name)
         if fn:
             asyncio.create_task(_execute_with_retries(fn, task_name, task_envelope, max_retries))

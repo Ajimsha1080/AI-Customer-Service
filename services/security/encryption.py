@@ -7,11 +7,12 @@ from typing import Optional, Dict, Tuple
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from apps.api.config import settings
+from services.common.redis_service import get_redis_client_sync
 
 class EnvelopeEncryptionService:
     """Enterprise KMS-backed Envelope Encryption (AES-256-GCM).
     Uses a master Key Encryption Key (KEK) to encrypt ephemeral Data Encryption Keys (DEKs).
-    Supports per-tenant Bring-Your-Own-Key (BYOK) and zero-downtime key rotation.
+    Supports per-tenant Bring-Your-Own-Key (BYOK) stored in Redis/DB and zero-downtime key rotation.
     
     Envelope format:
     v1:<b64_encrypted_dek>:<b64_iv>:<b64_ciphertext_and_tag>
@@ -24,22 +25,52 @@ class EnvelopeEncryptionService:
             # Fallback to deriving from application secret key
             self.root_kek = hashlib.sha256(settings.SECRET_KEY.encode("utf-8")).digest()
         
-        # In-memory tenant BYOK store (maps tenant org_id -> 32-byte custom KEK)
+        # Local fallback cache for tenant BYOK store
         self.tenant_byok_store: Dict[str, bytes] = {}
 
+    def _redis(self):
+        try:
+            return get_redis_client_sync()
+        except Exception:
+            return None
+
     def register_tenant_byok(self, org_id: str, byok_key_hex: str) -> None:
-        """Configures a custom tenant-supplied KEK for Enterprise plan tenants."""
+        """Configures a custom tenant-supplied KEK for Enterprise plan tenants in Redis."""
         if len(byok_key_hex) != 64:
             raise ValueError("Tenant BYOK key must be a 64-character hex string (256 bits).")
-        self.tenant_byok_store[org_id] = bytes.fromhex(byok_key_hex)
+        key_bytes = bytes.fromhex(byok_key_hex)
+        self.tenant_byok_store[org_id] = key_bytes
+        r = self._redis()
+        if r:
+            try:
+                r.set(f"hac:byok:{org_id}", byok_key_hex)
+            except Exception as e:
+                if settings.is_production:
+                    raise RuntimeError(f"Failed to store BYOK key in Redis: {e}")
 
     def remove_tenant_byok(self, org_id: str) -> None:
         """Removes custom BYOK key, reverting back to platform master KEK."""
         self.tenant_byok_store.pop(org_id, None)
+        r = self._redis()
+        if r:
+            try:
+                r.delete(f"hac:byok:{org_id}")
+            except Exception:
+                pass
 
     def _get_kek(self, org_id: Optional[str] = None) -> bytes:
-        if org_id and org_id in self.tenant_byok_store:
-            return self.tenant_byok_store[org_id]
+        if org_id:
+            r = self._redis()
+            if r:
+                try:
+                    val = r.get(f"hac:byok:{org_id}")
+                    if val:
+                        hex_str = val.decode("utf-8") if isinstance(val, bytes) else val
+                        return bytes.fromhex(hex_str)
+                except Exception:
+                    pass
+            if org_id in self.tenant_byok_store:
+                return self.tenant_byok_store[org_id]
         return self.root_kek
 
     def encrypt(self, plaintext: str, org_id: Optional[str] = None) -> str:

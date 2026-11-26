@@ -289,12 +289,13 @@ async def accept_invitation(req: AcceptInvitationRequest, response: Response, db
 @router.post("/login")
 @limiter.limit("30/minute")
 async def login(request: Request, req: LoginRequest, response: Response, db: AsyncSession = Depends(get_db)):
-    check_login_lockout(req.email)
+    client_ip = extract_client_ip(request)
+    await check_login_lockout(req.email, client_ip)
     stmt = select(User).where(User.email == req.email)
     res = await db.execute(stmt)
     user = res.scalar_one_or_none()
     if not user or not verify_password(req.password, user.hashed_password):
-        record_failed_login(req.email)
+        await record_failed_login(req.email, client_ip)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid credentials"
@@ -337,7 +338,7 @@ async def login(request: Request, req: LoginRequest, response: Response, db: Asy
             "message": "Multi-factor authentication required. Please verify with your authenticator code or recovery code."
         }
 
-    reset_login_failures(req.email)
+    await reset_login_failures(req.email, client_ip)
 
     await record_audit_log_async(
         org_id=user.organization_id,

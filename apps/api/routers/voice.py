@@ -67,6 +67,12 @@ async def text_to_speech_gateway(request: Request, req: TTSRequest):
         )
 
     cache_key = f"{req.language}:{req.text.strip().lower()}"
+    from services.common.redis_service import get_redis_client
+    redis = await get_redis_client()
+    redis_tts_key = f"hac:tts:{cache_key}"
+    cached_redis = await redis.get(redis_tts_key)
+    if cached_redis:
+        return {"audio_base64": cached_redis, "format": "audio/mp3", "source": "INDIC_VOICE_TTS_CACHED"}
     if cache_key in TTS_AUDIO_CACHE:
         return {"audio_base64": TTS_AUDIO_CACHE[cache_key], "format": "audio/mp3", "source": "INDIC_VOICE_TTS_CACHED"}
 

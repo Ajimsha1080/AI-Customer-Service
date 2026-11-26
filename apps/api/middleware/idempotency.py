@@ -7,9 +7,11 @@ from starlette.requests import Request
 from starlette.responses import Response, JSONResponse
 from apps.api.config import settings
 
+from services.common.redis_service import get_redis_client
+
 logger = logging.getLogger("hospitality_agent_cloud.middleware.idempotency")
 
-# In-memory storage for idempotency: key -> {"status_code": int, "headers": dict, "body": str}
+# Backward compatibility reference for unit tests that clear state
 IDEMPOTENCY_CACHE: Dict[str, Dict[str, Any]] = {}
 IN_FLIGHT_KEYS: set = set()
 
@@ -17,8 +19,8 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
     """
     Enterprise Idempotency Middleware:
     Catches 'Idempotency-Key' on mutating methods (POST, PUT, PATCH, DELETE).
-    Deduplicates concurrent requests (409 Conflict) and replays completed responses
-    with 'X-Cache-Lookup: HIT' and 'Idempotency-Replayed: true'.
+    Deduplicates concurrent requests across replicas via Redis locks (409 Conflict)
+    and replays completed responses with 'X-Cache-Lookup: HIT' and 'Idempotency-Replayed: true'.
     """
     async def dispatch(self, request: Request, call_next):
         if request.method not in ("POST", "PUT", "PATCH", "DELETE"):
@@ -36,16 +38,22 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
         org_id = request.headers.get("X-Tenant-ID", "global")
         cache_key = f"idem:{org_id}:{idempotency_key}"
 
-        # 1. Check if identical request is currently in-flight
-        if cache_key in IN_FLIGHT_KEYS:
+        redis = await get_redis_client()
+        inflight_key = f"hac:idemp:inflight:{cache_key}"
+        resp_key = f"hac:idemp:resp:{cache_key}"
+
+        # 1. Check if identical request is currently in-flight across replicas
+        acquired = await redis.set(inflight_key, "1", nx=True, ex=60)
+        if not acquired or cache_key in IN_FLIGHT_KEYS:
             logger.warning(f"[Idempotency] Concurrent in-flight request for key '{cache_key}'")
             return JSONResponse(
                 status_code=409,
                 content={"detail": "CONCURRENT_REQUEST_IN_FLIGHT: An identical request is currently processing."}
             )
 
-        # 2. Check if already successfully resolved
-        cached = IDEMPOTENCY_CACHE.get(cache_key)
+        # 2. Check if already successfully resolved in Redis
+        cached_raw = await redis.get(resp_key)
+        cached = json.loads(cached_raw) if cached_raw else IDEMPOTENCY_CACHE.get(cache_key)
         if cached:
             logger.info(f"[Idempotency] Cache HIT for key '{cache_key}'. Replaying cached response.")
             headers = dict(cached["headers"])
@@ -65,7 +73,6 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
 
             # Only cache successful or client error responses (don't cache 5xx server crashes)
             if response.status_code < 500:
-                # Capture body
                 response_body = [chunk async for chunk in response.body_iterator]
                 response.body_iterator = _iterate_chunks(response_body)
                 raw_body = b"".join(response_body).decode("utf-8", errors="replace")
@@ -75,16 +82,19 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
                     if k.lower() not in ("content-length", "transfer-encoding"):
                         cached_headers[k] = v
 
-                IDEMPOTENCY_CACHE[cache_key] = {
+                cache_payload = {
                     "status_code": response.status_code,
                     "headers": cached_headers,
                     "body": raw_body,
                     "media_type": response.media_type
                 }
+                IDEMPOTENCY_CACHE[cache_key] = cache_payload
+                await redis.set(resp_key, json.dumps(cache_payload), ex=86400)
 
             return response
         finally:
             IN_FLIGHT_KEYS.discard(cache_key)
+            await redis.delete(inflight_key)
 
 async def _iterate_chunks(chunks):
     for c in chunks:
