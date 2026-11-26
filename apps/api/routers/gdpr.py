@@ -164,6 +164,67 @@ async def export_data_subject_records(
         "reservations": [{"id": r.id, "customer_name": r.customer_name, "check_in": r.check_in} for r in reservations]
     }
 
+@router.post("/export/zip")
+async def export_data_subject_zip(
+    req: DataSubjectExportRequest,
+    current_user: User = Depends(require_permission("audit:read")),
+    db: AsyncSession = Depends(get_db)
+):
+    """GDPR Article 15 Data Subject Access Request (DSAR) export as a ZIP archive of JSON files."""
+    from services.operations.retention import generate_gdpr_export_zip
+    org_id = current_user.organization_id
+    ident = req.guest_identifier.strip()
+
+    stmt_conv = select(Conversation).where(
+        Conversation.organization_id == org_id,
+        Conversation.channel_user_id == ident
+    )
+    res_conv = await db.execute(stmt_conv)
+    convs = res_conv.scalars().all()
+    conv_ids = [c.id for c in convs]
+
+    messages = []
+    if conv_ids:
+        res_msg = await db.execute(select(Message).where(Message.conversation_id.in_(conv_ids)))
+        messages = res_msg.scalars().all()
+
+    tickets = []
+    if conv_ids:
+        res_tickets = await db.execute(
+            select(SupportTicket).where(SupportTicket.organization_id == org_id, SupportTicket.conversation_id.in_(conv_ids))
+        )
+        tickets = res_tickets.scalars().all()
+
+    res_resv = await db.execute(
+        select(Reservation).where(Reservation.organization_id == org_id, Reservation.customer_email == ident)
+    )
+    reservations = res_resv.scalars().all()
+
+    records_dict = {
+        "conversations": [{"id": c.id, "channel": c.channel, "created_at": str(c.created_at)} for c in convs],
+        "messages": [{"id": m.id, "sender_type": m.sender_type, "content": m.content, "created_at": str(m.created_at)} for m in messages],
+        "support_tickets": [{"id": t.id, "issue_summary": t.issue_summary, "status": t.status} for t in tickets],
+        "reservations": [{"id": r.id, "customer_name": r.customer_name, "check_in": str(r.check_in)} for r in reservations]
+    }
+
+    zip_bytes = generate_gdpr_export_zip(records_dict)
+
+    await record_audit_log_async(
+        org_id=org_id,
+        user_id=current_user.id,
+        action="DATA_SUBJECT_ZIP_EXPORT_EXECUTED",
+        target_type="guest",
+        target_id=ident,
+        details={"record_count": sum(len(v) for v in records_dict.values())},
+        db=db
+    )
+
+    return Response(
+        content=zip_bytes,
+        media_type="application/zip",
+        headers={"Content-Disposition": f"attachment; filename=dsar_export_{ident}.zip"}
+    )
+
 @router.post("/erase")
 async def erase_data_subject_records(
     req: DataSubjectErasureRequest,
