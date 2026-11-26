@@ -1,5 +1,6 @@
 import secrets
 import uuid
+import logging
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Response
@@ -7,6 +8,8 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from jose import jwt, JWTError
+
+logger = logging.getLogger("hospitality_agent_cloud.routers.sso")
 
 from apps.api.config import settings
 from services.database.session import get_db, set_tenant_context
@@ -21,7 +24,8 @@ from services.security.saml_service import (
     validate_saml_response, check_and_record_assertion_id, SAMLValidationError
 )
 from services.security.oidc_service import (
-    generate_pkce_pair, build_oidc_authorization_url, validate_id_token, OIDCValidationError
+    generate_pkce_pair, build_oidc_authorization_url, validate_id_token,
+    fetch_oidc_discovery, fetch_jwks, exchange_code_for_tokens, OIDCValidationError
 )
 
 router = APIRouter(prefix="/api/v1/auth/sso", tags=["SSO"])
@@ -445,14 +449,55 @@ async def oidc_sso_callback(
     if not config or config.provider_type != "OIDC":
         raise HTTPException(status_code=404, detail="OIDC configuration not found for organization.")
 
-    # Validate ID token from response code or token
+    # Validate ID token from code exchange
+    code_verifier = state_data.get("code_verifier")
+    if not code_verifier:
+        raise HTTPException(status_code=400, detail="Missing PKCE code_verifier in state.")
+
+    # 1. Resolve OIDC Discovery endpoints
+    discovery_url = config.idp_metadata_url or config.idp_entity_id
+    token_endpoint = f"{(config.idp_sso_url or 'https://idp.example.com').rstrip('/')}/token"
+    jwks_uri = f"{(config.idp_sso_url or 'https://idp.example.com').rstrip('/')}/jwks"
+    issuer = config.idp_entity_id
+
+    if discovery_url:
+        try:
+            discovery = await fetch_oidc_discovery(discovery_url)
+            token_endpoint = discovery.get("token_endpoint") or token_endpoint
+            jwks_uri = discovery.get("jwks_uri") or jwks_uri
+            issuer = discovery.get("issuer") or issuer
+        except Exception as e:
+            logger.warning(f"OIDC discovery fallback: {e}")
+
+    # 2. Exchange authorization code with PKCE code_verifier for real tokens
+    base_url = str(request.base_url).rstrip("/")
+    redirect_uri = f"{base_url}/api/v1/auth/sso/oidc/callback"
+
+    try:
+        tokens = await exchange_code_for_tokens(
+            token_endpoint=token_endpoint,
+            code=req.code,
+            code_verifier=code_verifier,
+            redirect_uri=redirect_uri,
+            client_id=config.client_id or "",
+            client_secret=config.client_secret_encrypted
+        )
+    except OIDCValidationError as e:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=f"OIDC code exchange failed: {e}")
+
+    raw_id_token = tokens.get("id_token")
+    if not raw_id_token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="IdP did not return an ID token.")
+
+    # 3. Fetch JWKS and validate ID token
+    jwks = await fetch_jwks(jwks_uri)
     try:
         oidc_data = validate_id_token(
-            id_token=req.code,
+            id_token=raw_id_token,
             expected_client_id=config.client_id or "",
-            expected_issuer=config.idp_entity_id,
+            expected_issuer=issuer,
             expected_nonce=expected_nonce,
-            client_secret=config.client_secret_encrypted
+            jwks=jwks
         )
     except OIDCValidationError as e:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=f"OIDC validation failed: {e}")
