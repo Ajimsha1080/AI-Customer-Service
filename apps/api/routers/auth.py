@@ -69,7 +69,7 @@ class VerifyEmailRequest(BaseModel):
 class GoogleAuthCallbackRequest(BaseModel):
     code: str
     state: Optional[str] = None
-    redirect_uri: Optional[str] = "http://localhost:3002/auth/callback/google"
+    redirect_uri: Optional[str] = None
 
 def set_auth_cookies(response: Response, access_token: str, refresh_token: str) -> str:
     is_secure = settings.COOKIE_SECURE or (settings.ENVIRONMENT.lower() in ("production", "prod"))
@@ -396,17 +396,23 @@ async def login(request: Request, req: LoginRequest, response: Response, db: Asy
     }
 
 @router.get("/google/url")
-async def get_google_auth_url(redirect_uri: Optional[str] = "http://localhost:3002/auth/callback/google"):
-    """Returns Google OAuth2 authorization URL with cryptographically signed OAuth state."""
+async def get_google_auth_url(redirect_uri: Optional[str] = None):
+    """Returns Google OAuth2 authorization URL with cryptographically signed OAuth state and server-derived redirect_uri."""
     if not settings.GOOGLE_CLIENT_ID:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Google OAuth SSO is not configured on this server."
         )
+    server_redirect_uri = f"{settings.FRONTEND_BASE_URL.rstrip('/')}/auth/callback/google"
+    if redirect_uri and redirect_uri.rstrip('/') != server_redirect_uri.rstrip('/'):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="User-controlled redirect_uri is forbidden. Target must be built server-side from FRONTEND_BASE_URL."
+        )
     state = generate_oauth_state()
-    params = f"client_id={settings.GOOGLE_CLIENT_ID}&redirect_uri={redirect_uri}&response_type=code&scope=openid%20email%20profile&state={state}"
+    params = f"client_id={settings.GOOGLE_CLIENT_ID}&redirect_uri={server_redirect_uri}&response_type=code&scope=openid%20email%20profile&state={state}"
     auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?{params}"
-    return {"auth_url": auth_url, "client_id": settings.GOOGLE_CLIENT_ID, "state": state}
+    return {"auth_url": auth_url, "client_id": settings.GOOGLE_CLIENT_ID, "state": state, "redirect_uri": server_redirect_uri}
 
 @router.post("/google/callback")
 async def google_auth_callback(req: GoogleAuthCallbackRequest, db: AsyncSession = Depends(get_db)):
@@ -416,6 +422,13 @@ async def google_auth_callback(req: GoogleAuthCallbackRequest, db: AsyncSession 
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing OAuth state parameter. Request rejected to prevent CSRF."
+        )
+
+    server_redirect_uri = f"{settings.FRONTEND_BASE_URL.rstrip('/')}/auth/callback/google"
+    if req.redirect_uri and req.redirect_uri.rstrip('/') != server_redirect_uri.rstrip('/'):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="User-controlled redirect_uri is forbidden. Target must be built server-side from FRONTEND_BASE_URL."
         )
 
     if not settings.GOOGLE_CLIENT_ID or not settings.GOOGLE_CLIENT_SECRET:
@@ -432,7 +445,7 @@ async def google_auth_callback(req: GoogleAuthCallbackRequest, db: AsyncSession 
                     "code": req.code,
                     "client_id": settings.GOOGLE_CLIENT_ID,
                     "client_secret": settings.GOOGLE_CLIENT_SECRET,
-                    "redirect_uri": req.redirect_uri,
+                    "redirect_uri": server_redirect_uri,
                     "grant_type": "authorization_code"
                 }
             )

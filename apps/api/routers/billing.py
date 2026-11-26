@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from apps.api.config import settings
 from services.database.session import get_db
 from services.database.models import User, Conversation, UsageEvent, UserRole
 from apps.api.auth import get_current_user, verify_tenant_access
@@ -19,8 +20,8 @@ class PlanUpgradeRequest(BaseModel):
 
 class CheckoutSessionRequest(BaseModel):
     plan_name: str
-    success_url: Optional[str] = "http://localhost:3000/app/billing?session=success"
-    cancel_url: Optional[str] = "http://localhost:3000/app/billing?session=cancel"
+    success_url: Optional[str] = None
+    cancel_url: Optional[str] = None
 
 @router.get("/api/v1/billing/subscription")
 async def get_subscription_status(
@@ -37,7 +38,7 @@ async def get_subscription_status(
     }
 
 class CustomerPortalRequest(BaseModel):
-    return_url: Optional[str] = "http://localhost:3000/app/billing"
+    return_url: Optional[str] = None
 
 @router.post("/api/v1/billing/subscription/upgrade")
 async def upgrade_subscription_plan(
@@ -66,9 +67,15 @@ async def create_customer_portal(
 ):
     """Generates a Stripe Customer Portal link for managing subscription and payment methods."""
     org_id = verify_tenant_access(current_user, organization_id)
+    server_return_url = f"{settings.FRONTEND_BASE_URL.rstrip('/')}/app/billing"
+    if req.return_url and req.return_url.rstrip('/') != server_return_url.rstrip('/'):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="User-controlled return_url is forbidden. Target must be built server-side from FRONTEND_BASE_URL."
+        )
     return await stripe_service.create_customer_portal_session_async(
         organization_id=org_id,
-        return_url=req.return_url,
+        return_url=server_return_url,
         db=db
     )
 
@@ -79,13 +86,25 @@ async def create_stripe_checkout_session(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    """Creates a Stripe Checkout Session for subscription upgrade."""
+    """Creates a Stripe Checkout Session for subscription upgrade with server-derived redirect targets."""
     org_id = verify_tenant_access(current_user, organization_id)
+    server_success_url = f"{settings.FRONTEND_BASE_URL.rstrip('/')}/app/billing?session=success"
+    server_cancel_url = f"{settings.FRONTEND_BASE_URL.rstrip('/')}/app/billing?session=cancel"
+    if req.success_url and req.success_url.rstrip('/') != server_success_url.rstrip('/'):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="User-controlled success_url is forbidden. Target must be built server-side from FRONTEND_BASE_URL."
+        )
+    if req.cancel_url and req.cancel_url.rstrip('/') != server_cancel_url.rstrip('/'):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="User-controlled cancel_url is forbidden. Target must be built server-side from FRONTEND_BASE_URL."
+        )
     return await stripe_service.create_checkout_session_async(
         organization_id=org_id,
         plan_name=req.plan_name,
-        success_url=req.success_url,
-        cancel_url=req.cancel_url,
+        success_url=server_success_url,
+        cancel_url=server_cancel_url,
         db=db
     )
 

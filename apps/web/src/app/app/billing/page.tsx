@@ -37,9 +37,7 @@ export default function AppBillingPage() {
       const res = await authFetch('/api/v1/billing/checkout-session', {
         method: 'POST',
         body: JSON.stringify({
-          plan_name: targetPlan,
-          success_url: window.location.href + '?session=success',
-          cancel_url: window.location.href + '?session=cancel'
+          plan_name: targetPlan
         })
       });
 
