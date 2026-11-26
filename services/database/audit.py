@@ -1,6 +1,7 @@
 import json
 import logging
 import hashlib
+import hmac
 from typing import Optional, Dict, Any, Tuple
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,6 +10,21 @@ from services.database.models import AuditLog
 logger = logging.getLogger("hospitality_agent_cloud.audit")
 
 GENESIS_HASH = "0000000000000000000000000000000000000000000000000000000000000000"
+ACTIVE_KEY_VERSION = "v1"
+
+def _get_signing_keys() -> Dict[str, str]:
+    """Retrieves HMAC signing keys supporting key rotation."""
+    from apps.api.config import settings
+    configured = getattr(settings, "AUDIT_SIGNING_KEYS", None)
+    if isinstance(configured, dict):
+        return configured
+    if isinstance(configured, str) and configured.startswith("{"):
+        try:
+            return json.loads(configured)
+        except Exception:
+            pass
+    secret = getattr(settings, "SECRET_KEY", "audit_hmac_secret_key_rotation_default")
+    return {ACTIVE_KEY_VERSION: secret}
 
 def compute_entry_hash(
     prev_hash: str,
@@ -17,12 +33,55 @@ def compute_entry_hash(
     action: str,
     target_type: str,
     target_id: str,
-    details: Dict[str, Any]
+    details: Dict[str, Any],
+    key_version: Optional[str] = None
 ) -> str:
-    """Computes tamper-evident SHA-256 hash across canonical representation of audit entry."""
+    """Computes tamper-evident HMAC-SHA256 signature across canonical representation of audit entry,
+    incorporating prev_hash and all fields.
+    """
+    version = key_version or ACTIVE_KEY_VERSION
+    keys = _get_signing_keys()
+    key = keys.get(version, keys.get(ACTIVE_KEY_VERSION, "default_secret"))
     details_str = json.dumps(details or {}, sort_keys=True)
     canonical = f"{prev_hash}|{org_id}|{user_id or ''}|{action}|{target_type}|{target_id}|{details_str}"
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    sig = hmac.new(key.encode("utf-8"), canonical.encode("utf-8"), hashlib.sha256).hexdigest()
+    return f"{version}:{sig}"
+
+def verify_entry_hash(
+    stored_hash: str,
+    prev_hash: str,
+    org_id: str,
+    user_id: Optional[str],
+    action: str,
+    target_type: str,
+    target_id: str,
+    details: Dict[str, Any]
+) -> bool:
+    """Verifies that stored hash matches canonical representation, supporting rotated HMAC keys and legacy SHA256."""
+    if not stored_hash:
+        return False
+
+    keys = _get_signing_keys()
+    details_str = json.dumps(details or {}, sort_keys=True)
+    canonical = f"{prev_hash}|{org_id}|{user_id or ''}|{action}|{target_type}|{target_id}|{details_str}"
+
+    if ":" in stored_hash:
+        version, sig = stored_hash.split(":", 1)
+        key = keys.get(version)
+        if not key:
+            logger.warning(f"Audit log key version '{version}' not found in active key rotation set.")
+            return False
+        expected_sig = hmac.new(key.encode("utf-8"), canonical.encode("utf-8"), hashlib.sha256).hexdigest()
+        return hmac.compare_digest(sig, expected_sig)
+    else:
+        # Check against legacy raw SHA256
+        legacy = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        if hmac.compare_digest(stored_hash, legacy):
+            return True
+        # Check against default HMAC key
+        def_key = keys.get(ACTIVE_KEY_VERSION, "")
+        hmac_sig = hmac.new(def_key.encode("utf-8"), canonical.encode("utf-8"), hashlib.sha256).hexdigest()
+        return hmac.compare_digest(stored_hash, hmac_sig)
 
 async def record_audit_log_async(
     org_id: str,
@@ -73,7 +132,7 @@ async def record_audit_log_async(
         prev_hash=prev_h,
         hash=curr_hash
     )
-    logger.info(f"AUDIT_CHAIN [hash={curr_hash[:12]} prev={prev_h[:12]}]: org={org_id} user={user_id} action={action}")
+    logger.info(f"AUDIT_CHAIN [hash={curr_hash[:16]} prev={prev_h[:16]}]: org={org_id} user={user_id} action={action}")
     if db:
         db.add(log_entry)
         try:
@@ -84,6 +143,7 @@ async def record_audit_log_async(
 
 async def verify_audit_log_chain(org_id: str, db: AsyncSession) -> Tuple[bool, int, Optional[str]]:
     """Cryptographically verifies the integrity of the append-only audit log chain for an organization.
+    Alerts critically on broken links or tampered entries.
     Returns (is_valid, verified_count, error_reason).
     """
     stmt = (
@@ -101,15 +161,19 @@ async def verify_audit_log_chain(org_id: str, db: AsyncSession) -> Tuple[bool, i
     for idx, entry in enumerate(entries):
         # 1. Verify prev_hash matches prior entry's hash
         if idx == 0:
-            # First entry in chain
             if entry.prev_hash != GENESIS_HASH and entry.prev_hash is not None:
-                return False, idx, f"Genesis entry has invalid prev_hash: {entry.prev_hash}"
+                err = f"Genesis entry has invalid prev_hash: {entry.prev_hash}"
+                logger.critical(f"AUDIT_CHAIN_INTEGRITY_BREACH: [org={org_id}, index={idx}] {err}")
+                return False, idx, err
         else:
             if entry.prev_hash != expected_prev:
-                return False, idx, f"Broken chain link at index {idx}: expected prev {expected_prev}, got {entry.prev_hash}"
+                err = f"Broken chain link at index {idx}: expected prev {expected_prev}, got {entry.prev_hash}"
+                logger.critical(f"AUDIT_CHAIN_INTEGRITY_BREACH: [org={org_id}, index={idx}] {err}")
+                return False, idx, err
 
-        # 2. Recompute hash from entry attributes
-        recomputed = compute_entry_hash(
+        # 2. Verify HMAC cryptographic signature across all fields
+        is_entry_valid = verify_entry_hash(
+            stored_hash=entry.hash,
             prev_hash=entry.prev_hash or GENESIS_HASH,
             org_id=entry.organization_id,
             user_id=entry.user_id,
@@ -118,8 +182,10 @@ async def verify_audit_log_chain(org_id: str, db: AsyncSession) -> Tuple[bool, i
             target_id=entry.target_id,
             details=entry.details_json or {}
         )
-        if entry.hash != recomputed:
-            return False, idx, f"Tampered entry detected at index {idx}: stored {entry.hash}, recomputed {recomputed}"
+        if not is_entry_valid:
+            err = f"Tampered entry detected at index {idx}: signature mismatch for entry {entry.id}"
+            logger.critical(f"AUDIT_CHAIN_INTEGRITY_BREACH: [org={org_id}, index={idx}, entry_id={entry.id}] {err}")
+            return False, idx, err
 
         expected_prev = entry.hash
 

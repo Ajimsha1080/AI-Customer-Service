@@ -512,8 +512,8 @@ class AuditLog(Base):
     target_type: Mapped[str] = mapped_column(String(50), nullable=False)
     target_id: Mapped[str] = mapped_column(String(36), nullable=False)
     details_json: Mapped[dict] = mapped_column(JSON, default=dict)
-    prev_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
-    hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    prev_hash: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    hash: Mapped[Optional[str]] = mapped_column(String(128), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=get_utc_now)
 
 class RevokedToken(Base):

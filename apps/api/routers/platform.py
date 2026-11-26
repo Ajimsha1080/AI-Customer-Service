@@ -687,3 +687,29 @@ async def approve_break_glass_access(
         "message": "Break-glass access approved. Requester may now access target organization resources."
     }
 
+
+@router.post("/audit-logs/{org_id}/verify-chain")
+async def verify_platform_audit_log_chain(
+    org_id: str,
+    current_user: User = Depends(get_super_admin_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Platform Super Admin cryptographically verifies tenant audit log chain integrity."""
+    from services.database.audit import verify_audit_log_chain
+    is_valid, verified_count, error_reason = await verify_audit_log_chain(org_id, db)
+    if not is_valid:
+        return {
+            "status": "COMPROMISED",
+            "organization_id": org_id,
+            "verified_count": verified_count,
+            "error": error_reason,
+            "message": "CRITICAL: Tamper detected in audit log hash chain."
+        }
+    return {
+        "status": "VALID",
+        "organization_id": org_id,
+        "verified_count": verified_count,
+        "message": "Audit log hash chain is cryptographically intact and tamper-evident."
+    }
+
+

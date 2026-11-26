@@ -674,3 +674,30 @@ async def get_organization_audit_logs(
     ]
 
 
+@router.post("/organizations/{organization_id}/audit-logs/verify")
+async def verify_organization_audit_log_chain(
+    organization_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Cryptographically verifies tenant audit log chain integrity and alerts on tamper."""
+    from services.database.audit import verify_audit_log_chain
+    org_id = verify_tenant_access(current_user, organization_id)
+    is_valid, verified_count, error_reason = await verify_audit_log_chain(org_id, db)
+    if not is_valid:
+        return {
+            "status": "COMPROMISED",
+            "organization_id": org_id,
+            "verified_count": verified_count,
+            "error": error_reason,
+            "message": "CRITICAL: Tamper detected in audit log hash chain."
+        }
+    return {
+        "status": "VALID",
+        "organization_id": org_id,
+        "verified_count": verified_count,
+        "message": "Audit log hash chain is cryptographically intact and tamper-evident."
+    }
+
+
+
