@@ -517,8 +517,12 @@ async def get_current_user(
 
     raw_token = None
     is_cookie_auth = False
-    if credentials and credentials.credentials:
+    if credentials and hasattr(credentials, "credentials") and credentials.credentials:
         raw_token = credentials.credentials
+    elif request and request.headers.get("Authorization"):
+        auth_hdr = request.headers.get("Authorization", "")
+        if auth_hdr.startswith("Bearer "):
+            raw_token = auth_hdr[7:].strip()
     elif request and (request.cookies.get("access_token") or request.cookies.get("session_token")):
         raw_token = request.cookies.get("access_token") or request.cookies.get("session_token")
         is_cookie_auth = True

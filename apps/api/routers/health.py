@@ -1,12 +1,14 @@
+import ipaddress
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException, status
+from typing import Optional
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy import select, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.api.config import settings
 from services.database.session import get_db
-from services.database.models import User, Agent, Conversation
-from apps.api.auth import get_super_admin_user
+from services.database.models import User, Agent, Conversation, UserRole
+from apps.api.auth import get_super_admin_user, extract_client_ip, get_current_user
 
 router = APIRouter(tags=["Health"])
 
@@ -141,20 +143,47 @@ async def public_incidents_log():
     from services.operations.incident_manager import incident_manager
     return {"incidents": incident_manager.list_incidents()}
 
+async def verify_internal_metrics_access(
+    request: Request,
+    db: AsyncSession = Depends(get_db)
+):
+    """Enforces that metrics scrape endpoints are strictly internal-only or Super Admin."""
+    client_ip = extract_client_ip(request)
+    if client_ip:
+        try:
+            ip_obj = ipaddress.ip_address(client_ip)
+            if ip_obj.is_loopback or ip_obj.is_private:
+                return True
+        except Exception:
+            pass
+    # If not from internal network, check if caller is an authenticated Super Admin
+    try:
+        user = await get_current_user(request=request, db=db)
+        if user and user.role == UserRole.SUPER_ADMIN:
+            return True
+    except Exception:
+        pass
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Access denied: metrics endpoints are restricted to internal network or Super Admin."
+    )
+
 @router.get("/prometheus/metrics")
-async def prometheus_metrics():
-    """Public or internal Prometheus scrape endpoint (standard text exposition format)."""
+@router.get("/api/v1/prometheus/metrics")
+async def prometheus_metrics(_auth: bool = Depends(verify_internal_metrics_access)):
+    """Internal Prometheus scrape endpoint (standard text exposition format)."""
     from services.operations.metrics import metrics_registry
     from fastapi.responses import Response
     content = metrics_registry.generate_prometheus_format()
     return Response(content=content, media_type="text/plain; version=0.0.4; charset=utf-8")
 
 @router.get("/metrics")
+@router.get("/api/v1/metrics")
 async def metrics(
-    current_user: User = Depends(get_super_admin_user),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    _auth: bool = Depends(verify_internal_metrics_access)
 ):
-    """0.7 Protected metrics: Super Admin authorization required."""
+    """Internal / Super Admin metrics endpoint."""
     agents_res = await db.execute(select(func.count(Agent.id)))
     active_agents = agents_res.scalar() or 0
 

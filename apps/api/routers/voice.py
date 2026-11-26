@@ -4,20 +4,22 @@ import base64
 import struct
 import math
 import uuid
+import hashlib
 from typing import Optional
 from fastapi import APIRouter, Request, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from jose import jwt, JWTError
 import httpx
 
 from apps.api.config import settings
 from services.security.limiter import limiter
 from services.operations.feature_flags import feature_flags
-from services.resilience.tenant_limiter import enforce_tenant_fair_use_quota
+from services.resilience.tenant_limiter import enforce_tenant_fair_use_quota, tenant_limiter
 from services.integrations.voice_pipeline import voice_pipeline
 from services.database.session import get_db, set_tenant_context
-from services.database.models import VoiceSession, Agent, AgentStatus
-from sqlalchemy import select
+from services.database.models import VoiceSession, Agent, AgentStatus, ApiKey
 
 router = APIRouter(prefix="/api/v1/voice", tags=["Data Plane - Voice Gateway"])
 
@@ -50,16 +52,84 @@ def generate_synthetic_wav_audio(duration_sec=1.5, sample_rate=16000, freq=440.0
             wav_file.writeframes(struct.pack('<h', val))
     return base64.b64encode(buf.getvalue()).decode('utf-8')
 
-@router.post("/tts", dependencies=[Depends(enforce_tenant_fair_use_quota)])
+async def get_tts_principal_and_org(
+    request: Request,
+    db: AsyncSession = Depends(get_db)
+) -> str:
+    """Authenticates TTS caller via guest session token, Bearer access token, or API key.
+    Rejects anonymous calls and does not trust arbitrary client X-Tenant-ID headers."""
+    # 1. Check API Key
+    api_key_header = request.headers.get("x-api-key") or request.headers.get("X-API-Key")
+    if api_key_header:
+        key_hash = hashlib.sha256(api_key_header.strip().encode("utf-8")).hexdigest()
+        stmt_key = select(ApiKey).where(ApiKey.key_hash == key_hash, ApiKey.is_active == True)
+        res_key = await db.execute(stmt_key)
+        api_key_row = res_key.scalar_one_or_none()
+        if not api_key_row:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API key.")
+        return api_key_row.organization_id
+
+    # 2. Check Bearer token or cookie
+    auth_header = request.headers.get("Authorization") or request.headers.get("authorization")
+    raw_token = None
+    if auth_header and auth_header.startswith("Bearer "):
+        raw_token = auth_header[7:].strip()
+    elif request.cookies.get("access_token"):
+        raw_token = request.cookies.get("access_token")
+
+    if not raw_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required: guest session token, access token, or API key required."
+        )
+
+    # 3. Decode token
+    try:
+        payload = jwt.decode(
+            raw_token,
+            settings.JWT_SECRET_KEY,
+            algorithms=[settings.JWT_ALGORITHM],
+            options={"verify_aud": False}
+        )
+        token_type = payload.get("token_type")
+        if token_type not in ("guest_session", "access"):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token type for TTS endpoint. Must be guest_session or access token."
+            )
+        org_id = payload.get("org_id")
+        if not org_id:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token missing organization context.")
+        return org_id
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=f"Invalid authentication token: {e}")
+
+@router.post("/tts")
 @limiter.limit("20/minute")
-async def text_to_speech_gateway(request: Request, req: TTSRequest):
-    org_id = (
-        getattr(request.state, "tenant_id", None)
-        or getattr(request.state, "organization_id", None)
-        or request.headers.get("X-Tenant-ID")
-        or request.headers.get("x-tenant-id")
-        or "global"
-    )
+async def text_to_speech_gateway(
+    request: Request,
+    req: TTSRequest,
+    org_id: str = Depends(get_tts_principal_and_org),
+    db: AsyncSession = Depends(get_db)
+):
+    # Enforce tenant fair-use quota
+    rate_ok, rem_tokens, retry_sec = await tenant_limiter.consume(org_id=org_id, cost=1)
+    if not rate_ok:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Rate limit exceeded for tenant. Burst limit: {tenant_limiter.default_burst_capacity}.",
+            headers={"Retry-After": str(retry_sec)}
+        )
+
+    # Meter TTS usage per tenant in Redis
+    from services.common.redis_service import get_redis_client
+    redis = await get_redis_client()
+    char_count = len(req.text)
+    await redis.incrby(f"hac:tts_usage:{org_id}:chars", char_count)
+    await redis.incr(f"hac:tts_usage:{org_id}:requests")
+
     if feature_flags.is_kill_switch_active("kill_switch_voice") or not feature_flags.is_enabled("voice", org_id=org_id):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
