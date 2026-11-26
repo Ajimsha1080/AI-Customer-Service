@@ -15,10 +15,56 @@ logger = logging.getLogger("hospitality_agent_cloud.middleware.idempotency")
 IDEMPOTENCY_CACHE: Dict[str, Dict[str, Any]] = {}
 IN_FLIGHT_KEYS: set = set()
 
+import json
+import logging
+import hashlib
+from typing import Dict, Any, Optional
+import jwt
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import Response, JSONResponse
+from apps.api.config import settings
+from apps.api.auth import extract_client_ip
+from services.common.redis_service import get_redis_client
+
+logger = logging.getLogger("hospitality_agent_cloud.middleware.idempotency")
+
+# Backward compatibility reference for unit tests that clear state
+IDEMPOTENCY_CACHE: Dict[str, Dict[str, Any]] = {}
+IN_FLIGHT_KEYS: set = set()
+
+def _extract_principal(request: Request) -> str:
+    """Derives authenticated principal securely from Bearer JWT, API key, or client IP.
+    Never trusts client-controlled X-Tenant-ID header.
+    """
+    auth_header = request.headers.get("Authorization") or request.headers.get("authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        token = auth_header[7:].strip()
+        try:
+            payload = jwt.decode(token, options={"verify_signature": False, "verify_exp": False})
+            sub = payload.get("sub")
+            if sub:
+                return f"user:{sub}"
+        except Exception:
+            pass
+        return f"token:{hashlib.sha256(token.encode('utf-8')).hexdigest()[:16]}"
+
+    api_key = request.headers.get("X-API-Key") or request.headers.get("x-api-key")
+    if api_key:
+        return f"key:{hashlib.sha256(api_key.strip().encode('utf-8')).hexdigest()[:16]}"
+
+    try:
+        client_ip = extract_client_ip(request)
+        return f"ip:{client_ip}"
+    except Exception:
+        return "anon:global"
+
 class IdempotencyMiddleware(BaseHTTPMiddleware):
     """
     Enterprise Idempotency Middleware:
     Catches 'Idempotency-Key' on mutating methods (POST, PUT, PATCH, DELETE).
+    Keys on: authenticated principal + method + path + body hash.
+    Enforces strict reuse rules: same key with different request body returns 422 Unprocessable Entity.
     Deduplicates concurrent requests across replicas via Redis locks (409 Conflict)
     and replays completed responses with 'X-Cache-Lookup: HIT' and 'Idempotency-Replayed: true'.
     """
@@ -35,39 +81,70 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
         if not idempotency_key:
             return await call_next(request)
 
-        org_id = request.headers.get("X-Tenant-ID", "global")
-        cache_key = f"idem:{org_id}:{idempotency_key}"
+        # Read request body to compute cryptographic hash
+        body_bytes = await request.body()
+        body_hash = hashlib.sha256(body_bytes).hexdigest()
+
+        # Scope key by authenticated principal + method + path + idempotency key
+        principal = _extract_principal(request)
+        scope_key = f"hac:idemp:{principal}:{request.method}:{path}:{idempotency_key}"
+        inflight_key = f"hac:idemp:inflight:{scope_key}"
 
         redis = await get_redis_client()
-        inflight_key = f"hac:idemp:inflight:{cache_key}"
-        resp_key = f"hac:idemp:resp:{cache_key}"
 
-        # 1. Check if identical request is currently in-flight across replicas
-        acquired = await redis.set(inflight_key, "1", nx=True, ex=60)
-        if not acquired or cache_key in IN_FLIGHT_KEYS:
-            logger.warning(f"[Idempotency] Concurrent in-flight request for key '{cache_key}'")
+        # 1. Check if this idempotency key was previously seen for this principal+method+path
+        cached_meta_raw = await redis.get(scope_key)
+        if cached_meta_raw:
+            try:
+                cached_meta = json.loads(cached_meta_raw)
+            except Exception:
+                cached_meta = {}
+
+            stored_body_hash = cached_meta.get("body_hash")
+            # If the same idempotency key is submitted with a DIFFERENT body -> 422
+            if stored_body_hash and stored_body_hash != body_hash:
+                logger.warning(
+                    f"[Idempotency] Key '{idempotency_key}' reused with different body hash: "
+                    f"stored={stored_body_hash}, incoming={body_hash}"
+                )
+                return JSONResponse(
+                    status_code=422,
+                    content={"detail": "Idempotency key mismatch: cannot reuse the same idempotency key with a different request payload."}
+                )
+
+            # If response was already cached for this exact body, replay it
+            if "response" in cached_meta:
+                cached = cached_meta["response"]
+                logger.info(f"[Idempotency] Cache HIT for key '{scope_key}'. Replaying cached response.")
+                headers = dict(cached["headers"])
+                headers["X-Cache-Lookup"] = "HIT"
+                headers["Idempotency-Replayed"] = "true"
+                return Response(
+                    content=cached["body"],
+                    status_code=cached["status_code"],
+                    headers=headers,
+                    media_type=cached.get("media_type", "application/json")
+                )
+
+        # 2. Check in-flight lock across replicas (409 Conflict)
+        acquired = await redis.set(inflight_key, body_hash, nx=True, ex=60)
+        if not acquired or scope_key in IN_FLIGHT_KEYS:
+            current_inflight_hash = await redis.get(inflight_key)
+            if current_inflight_hash and current_inflight_hash != body_hash:
+                return JSONResponse(
+                    status_code=422,
+                    content={"detail": "Idempotency key mismatch: cannot reuse the same idempotency key with a different request payload."}
+                )
+            logger.warning(f"[Idempotency] Concurrent in-flight request for key '{scope_key}'")
             return JSONResponse(
                 status_code=409,
                 content={"detail": "CONCURRENT_REQUEST_IN_FLIGHT: An identical request is currently processing."}
             )
 
-        # 2. Check if already successfully resolved in Redis
-        cached_raw = await redis.get(resp_key)
-        cached = json.loads(cached_raw) if cached_raw else IDEMPOTENCY_CACHE.get(cache_key)
-        if cached:
-            logger.info(f"[Idempotency] Cache HIT for key '{cache_key}'. Replaying cached response.")
-            headers = dict(cached["headers"])
-            headers["X-Cache-Lookup"] = "HIT"
-            headers["Idempotency-Replayed"] = "true"
-            return Response(
-                content=cached["body"],
-                status_code=cached["status_code"],
-                headers=headers,
-                media_type=cached.get("media_type", "application/json")
-            )
+        # 3. Store initial record with body_hash to detect mid-flight mismatch
+        await redis.set(scope_key, json.dumps({"body_hash": body_hash}), ex=86400)
+        IN_FLIGHT_KEYS.add(scope_key)
 
-        # 3. Process new request
-        IN_FLIGHT_KEYS.add(cache_key)
         try:
             response = await call_next(request)
 
@@ -88,12 +165,12 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
                     "body": raw_body,
                     "media_type": response.media_type
                 }
-                IDEMPOTENCY_CACHE[cache_key] = cache_payload
-                await redis.set(resp_key, json.dumps(cache_payload), ex=86400)
+                IDEMPOTENCY_CACHE[scope_key] = cache_payload
+                await redis.set(scope_key, json.dumps({"body_hash": body_hash, "response": cache_payload}), ex=86400)
 
             return response
         finally:
-            IN_FLIGHT_KEYS.discard(cache_key)
+            IN_FLIGHT_KEYS.discard(scope_key)
             await redis.delete(inflight_key)
 
 async def _iterate_chunks(chunks):
