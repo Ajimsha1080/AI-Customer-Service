@@ -85,6 +85,17 @@ resource "aws_subnet" "public_b" {
   }
 }
 
+resource "aws_subnet" "public_c" {
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = "10.0.12.0/24"
+  availability_zone       = "${var.aws_region}c"
+  map_public_ip_on_launch = false
+
+  tags = {
+    Name = "hospitality-public-c"
+  }
+}
+
 resource "aws_subnet" "private_a" {
   vpc_id            = aws_vpc.main.id
   cidr_block        = "10.0.1.0/24"
@@ -102,6 +113,16 @@ resource "aws_subnet" "private_b" {
 
   tags = {
     Name = "hospitality-private-b"
+  }
+}
+
+resource "aws_subnet" "private_c" {
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = "10.0.3.0/24"
+  availability_zone = "${var.aws_region}c"
+
+  tags = {
+    Name = "hospitality-private-c"
   }
 }
 
@@ -186,10 +207,27 @@ resource "aws_secretsmanager_secret_version" "migration_db_url" {
   secret_string = "postgresql+asyncpg://postgres:${var.db_password}@${aws_db_instance.postgres.endpoint}/${aws_db_instance.postgres.db_name}"
 }
 
+# --- CUSTOMER MANAGED KMS KEY WITH AUTOMATIC ANNUAL ROTATION ---
+resource "aws_kms_key" "app_kms" {
+  description             = "Customer managed KMS key for Hospitality Agent Cloud encryption at rest"
+  deletion_window_in_days = 30
+  enable_key_rotation     = true
+
+  tags = {
+    Name        = "hospitality-agent-kms-${var.environment}"
+    Environment = var.environment
+  }
+}
+
+resource "aws_kms_alias" "app_kms_alias" {
+  name          = "alias/hospitality-agent-${var.environment}"
+  target_key_id = aws_kms_key.app_kms.key_id
+}
+
 # --- RDS POSTGRESQL WITH PGVECTOR & PITR ---
 resource "aws_db_subnet_group" "db_subnets" {
   name       = "hospitality-agent-db-subnets"
-  subnet_ids = [aws_subnet.private_a.id, aws_subnet.private_b.id]
+  subnet_ids = [aws_subnet.private_a.id, aws_subnet.private_b.id, aws_subnet.private_c.id]
 }
 
 resource "aws_security_group" "db_sg" {
@@ -227,6 +265,7 @@ resource "aws_db_instance" "postgres" {
   vpc_security_group_ids      = [aws_security_group.db_sg.id]
   multi_az                    = true
   storage_encrypted           = true
+  kms_key_id                  = aws_kms_key.app_kms.arn
   backup_retention_period     = 30
   backup_window               = "02:00-03:00"
   maintenance_window          = "Sun:04:00-Sun:05:00"
@@ -239,7 +278,7 @@ resource "aws_db_instance" "postgres" {
 # --- ENCRYPTED ELASTICACHE REDIS REPLICATION GROUP ---
 resource "aws_elasticache_subnet_group" "redis_subnets" {
   name       = "hospitality-agent-redis-subnets"
-  subnet_ids = [aws_subnet.private_a.id, aws_subnet.private_b.id]
+  subnet_ids = [aws_subnet.private_a.id, aws_subnet.private_b.id, aws_subnet.private_c.id]
 }
 
 resource "aws_security_group" "redis_sg" {
@@ -267,6 +306,7 @@ resource "aws_elasticache_replication_group" "redis" {
   multi_az_enabled           = true
   at_rest_encryption_enabled = true
   transit_encryption_enabled = true
+  kms_key_id                  = aws_kms_key.app_kms.arn
   auth_token                 = var.redis_auth_token
 }
 
@@ -305,7 +345,7 @@ resource "aws_lb" "main" {
   internal           = false
   load_balancer_type = "application"
   security_groups    = [aws_security_group.alb_sg.id]
-  subnets            = [aws_subnet.public_a.id, aws_subnet.public_b.id]
+  subnets            = [aws_subnet.public_a.id, aws_subnet.public_b.id, aws_subnet.public_c.id]
   drop_invalid_header_fields = true
 
   tags = {
@@ -708,7 +748,8 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "rag_encryption" {
 
   rule {
     apply_server_side_encryption_by_default {
-      sse_algorithm = "AES256"
+      sse_algorithm     = "aws:kms"
+      kms_master_key_id = aws_kms_key.app_kms.arn
     }
   }
 }
@@ -720,4 +761,97 @@ resource "aws_s3_bucket_public_access_block" "rag_pab" {
   block_public_policy     = true
   ignore_public_acls      = true
   restrict_public_buckets = true
+}
+
+# --- LEAST-PRIVILEGE IAM ROLE FOR WORKER NODES ---
+resource "aws_iam_role" "worker_node_role" {
+  name = "hospitality-worker-node-role-${var.environment}"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = {
+        Service = "ec2.amazonaws.com"
+      }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "worker_cni_policy" {
+  role       = aws_iam_role.worker_node_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
+}
+
+resource "aws_iam_role_policy_attachment" "worker_node_policy" {
+  role       = aws_iam_role.worker_node_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"
+}
+
+resource "aws_iam_role_policy_attachment" "worker_ecr_policy" {
+  role       = aws_iam_role.worker_node_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
+}
+
+# --- CLOUDWATCH ALARMS (5XX, LATENCY, CPU, MEMORY) ---
+resource "aws_cloudwatch_metric_alarm" "alb_5xx" {
+  alarm_name          = "hospitality-alb-5xx-high-${var.environment}"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  metric_name         = "HTTPCode_Target_5XX_Count"
+  namespace           = "AWS/ApplicationELB"
+  period              = 60
+  statistic           = "Sum"
+  threshold           = 10
+  alarm_description   = "Triggered when ALB target 5xx error rate exceeds threshold"
+  dimensions = {
+    LoadBalancer = aws_lb.main.arn_suffix
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "alb_latency" {
+  alarm_name          = "hospitality-alb-latency-high-${var.environment}"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 3
+  metric_name         = "TargetResponseTime"
+  namespace           = "AWS/ApplicationELB"
+  period              = 60
+  statistic           = "Average"
+  threshold           = 1.5
+  alarm_description   = "Triggered when average API response latency exceeds 1.5s"
+  dimensions = {
+    LoadBalancer = aws_lb.main.arn_suffix
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "ecs_high_cpu" {
+  alarm_name          = "hospitality-ecs-cpu-high-${var.environment}"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/ECS"
+  period              = 120
+  statistic           = "Average"
+  threshold           = 80
+  alarm_description   = "Triggered when ECS API service CPU utilization exceeds 80%"
+  dimensions = {
+    ClusterName = aws_ecs_cluster.main.name
+    ServiceName = aws_ecs_service.api.name
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "ecs_high_memory" {
+  alarm_name          = "hospitality-ecs-memory-high-${var.environment}"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  metric_name         = "MemoryUtilization"
+  namespace           = "AWS/ECS"
+  period              = 120
+  statistic           = "Average"
+  threshold           = 80
+  alarm_description   = "Triggered when ECS API service Memory utilization exceeds 80%"
+  dimensions = {
+    ClusterName = aws_ecs_cluster.main.name
+    ServiceName = aws_ecs_service.api.name
+  }
 }
