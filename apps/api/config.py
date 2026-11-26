@@ -83,6 +83,9 @@ class Settings(BaseSettings):
     SMTP_STARTTLS: bool = False
     SENDGRID_API_KEY: Optional[str] = None
     DEFAULT_FROM_EMAIL: str = "noreply@concierge-ai.com"
+    EMAIL_WEBHOOK_SECRET: Optional[str] = None
+    SENDGRID_WEBHOOK_VERIFICATION_KEY: Optional[str] = None
+    AWS_SNS_TOPIC_ARN: Optional[str] = None
 
     LLM_TIMEOUT_SECONDS: float = 15.0
     DEFAULT_LLM_MODEL: str = "gpt-4o-mini"
