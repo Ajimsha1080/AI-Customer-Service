@@ -251,20 +251,60 @@ def decode_refresh_token(token: str) -> dict:
             detail="Could not validate refresh token credentials or token expired."
         )
 
+def extract_client_ip(request: Optional[Request]) -> Optional[str]:
+    """
+    Extracts client IP using trusted proxy handling.
+    Does NOT trust arbitrary X-Forwarded-For headers from untrusted clients.
+    Relies on request.client.host set by ProxyHeadersMiddleware or verifies against settings.FORWARDED_ALLOW_IPS.
+    """
+    if not request:
+        return None
+    direct_ip = request.client.host if request.client else None
+    if not direct_ip:
+        return None
+    if direct_ip == "testclient":
+        direct_ip = "127.0.0.1"
+
+    from apps.api.config import settings
+    trusted_entries = [p.strip() for p in settings.FORWARDED_ALLOW_IPS.split(",") if p.strip()]
+
+    def is_trusted(ip_str: str) -> bool:
+        if "*" in trusted_entries:
+            return True
+        try:
+            ip_obj = ipaddress.ip_address(ip_str)
+            for t in trusted_entries:
+                try:
+                    if "/" in t:
+                        if ip_obj in ipaddress.ip_network(t, strict=False):
+                            return True
+                    elif ip_obj == ipaddress.ip_address(t):
+                        return True
+                except ValueError:
+                    continue
+        except ValueError:
+            return False
+        return False
+
+    if is_trusted(direct_ip) and "X-Forwarded-For" in request.headers:
+        raw_xff = request.headers.get("X-Forwarded-For", "")
+        ips = [x.strip() for x in raw_xff.split(",") if x.strip()]
+        # Walk backward from right-most (most recent hop) to find the first untrusted IP
+        for candidate in reversed(ips):
+            if not is_trusted(candidate):
+                return candidate
+        return ips[0] if ips else direct_ip
+
+    return direct_ip
+
 def is_ip_allowed(client_ip: Optional[str], allowlist_str: Optional[str]) -> bool:
     """Validates if client IP matches an organization's configured IP allowlist."""
     if not allowlist_str or not allowlist_str.strip():
         return True
     if not client_ip:
-        return True
-    
-    entries = [e.strip() for e in allowlist_str.split(",") if e.strip()]
-    if client_ip in ("testclient", "localhost", "127.0.0.1", "::1"):
-        if any(e in ("127.0.0.1", "localhost", "testclient", "::1", "127.0.0.0/8") for e in entries):
-            return True
-        # If allowlist specifies non-local IPs, local test client without allowlist entry is blocked
         return False
 
+    entries = [e.strip() for e in allowlist_str.split(",") if e.strip()]
     try:
         c_ip = ipaddress.ip_address(client_ip.strip())
     except ValueError:
@@ -488,7 +528,7 @@ async def get_current_user(
         if org and org.ip_allowlist:
             client_ip = None
             if request:
-                client_ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip() or (request.client.host if request.client else None)
+                client_ip = extract_client_ip(request)
             if client_ip and not is_ip_allowed(client_ip, org.ip_allowlist):
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,

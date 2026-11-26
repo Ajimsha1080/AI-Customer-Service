@@ -14,7 +14,7 @@ from services.database.models import User, Organization, UserRole, SSOConfig
 from services.database.audit import record_audit_log_async
 from apps.api.auth import (
     get_current_user, create_access_token, create_refresh_token,
-    create_user_session, require_role, require_permission
+    create_user_session, require_role, require_permission, extract_client_ip
 )
 from apps.api.routers.auth import set_auth_cookies
 from services.security.saml_service import (
@@ -397,7 +397,7 @@ async def saml_sso_callback(
     })
     refresh_token = create_refresh_token({"sub": user.id})
 
-    client_ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip() or (request.client.host if request.client else None)
+    client_ip = extract_client_ip(request)
     user_agent = request.headers.get("User-Agent")
     await create_user_session(
         db=db,
@@ -505,7 +505,7 @@ async def oidc_sso_callback(
     })
     refresh_token = create_refresh_token({"sub": user.id})
 
-    client_ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip() or (request.client.host if request.client else None)
+    client_ip = extract_client_ip(request)
     user_agent = request.headers.get("User-Agent")
     await create_user_session(db=db, user_id=user.id, org_id=user.organization_id, access_token=access_token, ip_address=client_ip, user_agent=user_agent)
     set_auth_cookies(response, access_token, refresh_token)

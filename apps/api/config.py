@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     COOKIE_SECURE: bool = False
     COOKIE_SAMESITE: str = "lax"
 
+    FORWARDED_ALLOW_IPS: str = "127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+
     DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/hospitality_agent_cloud"
     READ_DATABASE_URL: Optional[str] = None
     PGVECTOR_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/hospitality_agent_cloud"

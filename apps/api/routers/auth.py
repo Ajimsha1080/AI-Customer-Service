@@ -21,7 +21,7 @@ from apps.api.auth import (
     decode_refresh_token_async, revoke_refresh_token,
     get_current_user, generate_oauth_state, verify_oauth_state,
     check_login_lockout, record_failed_login, reset_login_failures,
-    create_user_session, ROLE_HIERARCHY
+    create_user_session, ROLE_HIERARCHY, extract_client_ip
 )
 from services.security.limiter import limiter
 from services.security.password_policy import validate_password_policy
@@ -149,7 +149,7 @@ async def register(request: Request, req: RegisterRequest, response: Response, d
     access_token = create_access_token({"sub": user.id, "org_id": user.organization_id, "role": user.role.value if hasattr(user.role, "value") else str(user.role)})
     refresh_token = create_refresh_token({"sub": user.id})
 
-    client_ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip() or (request.client.host if request.client else None)
+    client_ip = extract_client_ip(request)
     user_agent = request.headers.get("User-Agent")
     await create_user_session(
         db=db,
@@ -352,7 +352,7 @@ async def login(request: Request, req: LoginRequest, response: Response, db: Asy
     access_token = create_access_token({"sub": user.id, "org_id": user.organization_id, "role": user.role.value if hasattr(user.role, "value") else str(user.role)})
     refresh_token = create_refresh_token({"sub": user.id})
 
-    client_ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip() or (request.client.host if request.client else None)
+    client_ip = extract_client_ip(request)
     user_agent = request.headers.get("User-Agent")
     await create_user_session(
         db=db,

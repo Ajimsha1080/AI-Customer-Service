@@ -15,7 +15,7 @@ from services.database.models import User
 from services.database.audit import record_audit_log_async
 from apps.api.auth import (
     get_current_user, create_access_token, create_refresh_token,
-    verify_password, create_user_session
+    verify_password, create_user_session, extract_client_ip
 )
 from apps.api.routers.auth import set_auth_cookies
 
@@ -177,7 +177,7 @@ async def verify_mfa_login(
     refresh_token = create_refresh_token({"sub": user.id})
 
     # Track enterprise session
-    client_ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip() or (request.client.host if request.client else None)
+    client_ip = extract_client_ip(request)
     user_agent = request.headers.get("User-Agent")
     await create_user_session(
         db=db,

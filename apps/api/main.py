@@ -64,6 +64,11 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+# --- PROXY HEADERS MIDDLEWARE ---
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+trusted_proxies = [h.strip() for h in settings.FORWARDED_ALLOW_IPS.split(",") if h.strip()]
+app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=trusted_proxies)
+
 # --- RATE LIMITING MIDDLEWARE ---
 from slowapi.middleware import SlowAPIMiddleware
 app.add_middleware(SlowAPIMiddleware)
