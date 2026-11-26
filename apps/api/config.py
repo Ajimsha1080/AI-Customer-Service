@@ -29,6 +29,7 @@ class Settings(BaseSettings):
 
     DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/hospitality_agent_cloud"
     READ_DATABASE_URL: Optional[str] = None
+    DATABASE_READ_REPLICA_URL: Optional[str] = None
     PGVECTOR_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/hospitality_agent_cloud"
     REDIS_URL: str = "redis://127.0.0.1:6379/0"
 
@@ -36,6 +37,7 @@ class Settings(BaseSettings):
     DB_MAX_OVERFLOW: int = 10
     DB_POOL_TIMEOUT: int = 30
     DB_POOL_RECYCLE: int = 1800
+    DB_STATEMENT_TIMEOUT_MS: int = 30000
 
     OPENAI_API_KEY: Optional[str] = None
     SARVAM_API_KEY: Optional[str] = None

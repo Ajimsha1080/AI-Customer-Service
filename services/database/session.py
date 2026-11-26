@@ -31,6 +31,7 @@ if "postgresql" in write_db_url:
         "max_overflow": settings.DB_MAX_OVERFLOW,
         "pool_timeout": settings.DB_POOL_TIMEOUT,
         "pool_recycle": settings.DB_POOL_RECYCLE,
+        "connect_args": {"server_settings": {"statement_timeout": str(settings.DB_STATEMENT_TIMEOUT_MS)}},
     })
 elif "sqlite" in write_db_url:
     engine_kwargs["connect_args"] = {"timeout": 60}
@@ -47,7 +48,7 @@ if "sqlite" in write_db_url:
         cursor.close()
 
 # Read Replica Engine Initialization (Enterprise Read/Write Isolation)
-read_db_url = _format_db_url(settings.READ_DATABASE_URL or settings.DATABASE_URL)
+read_db_url = _format_db_url(settings.DATABASE_READ_REPLICA_URL or settings.READ_DATABASE_URL or settings.DATABASE_URL)
 read_engine_kwargs = {
     "echo": settings.DEBUG,
     "future": True,
@@ -59,6 +60,7 @@ if "postgresql" in read_db_url:
         "max_overflow": settings.DB_MAX_OVERFLOW,
         "pool_timeout": settings.DB_POOL_TIMEOUT,
         "pool_recycle": settings.DB_POOL_RECYCLE,
+        "connect_args": {"server_settings": {"statement_timeout": str(settings.DB_STATEMENT_TIMEOUT_MS)}},
     })
 
 read_engine = create_async_engine(read_db_url, **read_engine_kwargs)
