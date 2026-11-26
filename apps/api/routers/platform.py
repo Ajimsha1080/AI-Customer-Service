@@ -239,12 +239,13 @@ async def get_database_health(current_user: User = Depends(get_super_admin_user)
 @router.post("/support/impersonate/{org_id}")
 async def impersonate_organization(
     org_id: str,
+    request: Request,
     current_user: User = Depends(get_super_admin_user),
     db: AsyncSession = Depends(get_db)
 ):
     """Enables Platform Super Admin to assume customer-approved support session."""
     from services.database.audit import record_audit_log_async
-    from apps.api.auth import create_impersonation_token
+    from apps.api.auth import create_impersonation_token, create_user_session, extract_client_ip
 
     stmt = select(Organization).where(Organization.id == org_id)
     res = await db.execute(stmt)
@@ -269,6 +270,19 @@ async def impersonate_organization(
     remaining_minutes = min(60, int((granted_exp - now).total_seconds() / 60))
     token = create_impersonation_token(admin_user=current_user, target_org_id=org_id, expires_in_minutes=max(1, remaining_minutes))
 
+    # H2: Impersonation gets its own session row, max 60 minutes
+    client_ip = extract_client_ip(request) if request else None
+    user_agent = request.headers.get("User-Agent") if request else None
+    await create_user_session(
+        db=db,
+        user_id=current_user.id,
+        org_id=org_id,
+        access_token=token,
+        ip_address=client_ip,
+        user_agent=user_agent,
+        expires_in_minutes=max(1, remaining_minutes)
+    )
+
     await record_audit_log_async(
         org_id=org_id,
         user_id=current_user.id,
@@ -278,6 +292,7 @@ async def impersonate_organization(
         details={"superadmin_id": current_user.id, "expires_in_minutes": remaining_minutes},
         db=db
     )
+    await db.commit()
 
     return {
         "impersonation_token": token,
