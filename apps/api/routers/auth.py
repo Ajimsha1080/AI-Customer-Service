@@ -321,7 +321,9 @@ async def login(request: Request, req: LoginRequest, response: Response, db: Asy
 
     # Multi-Factor Authentication Challenge
     mfa_required = bool(user.mfa_enabled)
-    if not mfa_required and user.organization_id:
+    if user.role == UserRole.SUPER_ADMIN:
+        mfa_required = True
+    elif not mfa_required and user.organization_id:
         stmt_org = select(Organization).where(Organization.id == user.organization_id)
         res_org = await db.execute(stmt_org)
         org = res_org.scalar_one_or_none()
