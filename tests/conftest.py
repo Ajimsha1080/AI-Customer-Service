@@ -24,6 +24,10 @@ async def prepare_db():
             cols = [r[1] for r in res.fetchall()]
             if "byok_kms_arn" not in cols:
                 await conn.execute(text("ALTER TABLE organizations ADD COLUMN byok_kms_arn VARCHAR(512)"))
+            res_scim = await conn.execute(text("PRAGMA table_info(scim_tokens)"))
+            scim_cols = [r[1] for r in res_scim.fetchall()]
+            if "is_revoked" not in scim_cols:
+                await conn.execute(text("ALTER TABLE scim_tokens ADD COLUMN is_revoked BOOLEAN DEFAULT 0 NOT NULL"))
 
     async with AsyncSessionLocal() as db:
         await db.execute(text("DELETE FROM agents WHERE agent_type NOT IN ('CONCIERGE', 'BOOKING', 'AVAILABILITY', 'SUPPORT', 'ACTIVITIES', 'RESTAURANT', 'VOICE', 'HOSTEL_AI_AGENT')"))

@@ -13,38 +13,75 @@ from services.database.models import User, Organization, UserRole, SCIMToken, Us
 from services.database.audit import record_audit_log_async
 from apps.api.auth import (
     get_current_user, require_permission,
-    revoke_all_user_sessions, _hash_token
+    revoke_all_user_sessions, _hash_token,
+    hash_password, verify_password
 )
 
 router = APIRouter(prefix="/api/v1/scim/v2", tags=["SCIM 2.0"])
 
 class CreateSCIMTokenRequest(BaseModel):
     name: str = "Okta/Azure SCIM Integration"
+    expires_in_days: Optional[int] = 90
 
 async def get_scim_org(
     authorization: Optional[str] = Header(None),
     db: AsyncSession = Depends(get_db)
 ) -> Organization:
-    """Authenticates SCIM 2.0 Bearer token and returns associated tenant organization."""
+    """Authenticates SCIM 2.0 Bearer token, verifying Argon2 hash, expiration, and revocation."""
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="SCIM Bearer token required."
         )
     token_str = authorization[len("Bearer "):].strip()
-    token_h = hashlib.sha256(token_str.encode("utf-8")).hexdigest()
+    if not token_str:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="SCIM Bearer token required."
+        )
 
-    stmt = select(SCIMToken).where(SCIMToken.token_hash == token_h)
-    res = await db.execute(stmt)
-    scim_token = res.scalar_one_or_none()
+    matched_token: Optional[SCIMToken] = None
+    # Fast lookup for structured token: scim_{token_id}_{secret}
+    parts = token_str.split("_")
+    if len(parts) >= 3 and parts[0] == "scim":
+        token_id = parts[1]
+        stmt = select(SCIMToken).where(SCIMToken.id == token_id)
+        res = await db.execute(stmt)
+        candidate = res.scalar_one_or_none()
+        if candidate and verify_password(token_str, candidate.token_hash):
+            matched_token = candidate
 
-    if not scim_token:
+    # Fallback lookup across unrevoked tokens
+    if not matched_token:
+        stmt_all = select(SCIMToken).where(SCIMToken.is_revoked == False)
+        res_all = await db.execute(stmt_all)
+        for candidate in res_all.scalars().all():
+            if verify_password(token_str, candidate.token_hash):
+                matched_token = candidate
+                break
+
+    if not matched_token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired SCIM token."
         )
 
-    stmt_org = select(Organization).where(Organization.id == scim_token.organization_id)
+    if matched_token.is_revoked:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="SCIM token has been revoked."
+        )
+
+    if matched_token.expires_at:
+        now = datetime.now(timezone.utc)
+        exp = matched_token.expires_at.replace(tzinfo=timezone.utc) if matched_token.expires_at.tzinfo is None else matched_token.expires_at
+        if exp < now:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="SCIM token has expired."
+            )
+
+    stmt_org = select(Organization).where(Organization.id == matched_token.organization_id)
     res_org = await db.execute(stmt_org)
     org = res_org.scalar_one_or_none()
 
@@ -61,20 +98,47 @@ async def get_scim_org(
     await set_tenant_context(db, org.id)
     return org
 
+@router.get("/tokens")
+async def list_scim_tokens(
+    current_user: User = Depends(require_permission("scim:manage")),
+    db: AsyncSession = Depends(get_db)
+):
+    """Lists SCIM directory tokens for current organization."""
+    stmt = select(SCIMToken).where(SCIMToken.organization_id == current_user.organization_id).order_by(SCIMToken.created_at.desc())
+    res = await db.execute(stmt)
+    tokens = res.scalars().all()
+    return [
+        {
+            "id": t.id,
+            "name": t.name,
+            "created_at": t.created_at.isoformat() if t.created_at else None,
+            "expires_at": t.expires_at.isoformat() if t.expires_at else None,
+            "is_revoked": t.is_revoked
+        }
+        for t in tokens
+    ]
+
 @router.post("/tokens")
 async def create_scim_token(
     req: CreateSCIMTokenRequest,
     current_user: User = Depends(require_permission("scim:manage")),
     db: AsyncSession = Depends(get_db)
 ):
-    """Generates a new SCIM 2.0 Directory Bearer Token for identity providers (Okta, Azure AD)."""
-    raw_token = f"scim_{secrets.token_urlsafe(32)}"
-    token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+    """Generates a new SCIM 2.0 Directory Bearer Token hashed with Argon2."""
+    token_id = str(uuid.uuid4())
+    secret = secrets.token_urlsafe(32)
+    raw_token = f"scim_{token_id}_{secret}"
+    token_hash = hash_password(raw_token)
+
+    expires_at = datetime.now(timezone.utc) + timedelta(days=req.expires_in_days) if req.expires_in_days else None
 
     token_rec = SCIMToken(
+        id=token_id,
         organization_id=current_user.organization_id,
         name=req.name,
-        token_hash=token_hash
+        token_hash=token_hash,
+        expires_at=expires_at,
+        is_revoked=False
     )
     db.add(token_rec)
     await db.flush()
@@ -85,7 +149,7 @@ async def create_scim_token(
         action="SCIM_TOKEN_CREATED",
         target_type="scim_token",
         target_id=token_rec.id,
-        details={"name": req.name},
+        details={"name": req.name, "expires_at": expires_at.isoformat() if expires_at else None},
         db=db
     )
 
@@ -93,8 +157,36 @@ async def create_scim_token(
         "id": token_rec.id,
         "name": token_rec.name,
         "token": raw_token,
+        "expires_at": expires_at.isoformat() if expires_at else None,
         "message": "Token generated. Copy this secret now as it cannot be shown again."
     }
+
+@router.delete("/tokens/{token_id}")
+async def revoke_scim_token(
+    token_id: str,
+    current_user: User = Depends(require_permission("scim:manage")),
+    db: AsyncSession = Depends(get_db)
+):
+    """Revokes a SCIM directory token."""
+    stmt = select(SCIMToken).where(SCIMToken.id == token_id, SCIMToken.organization_id == current_user.organization_id)
+    res = await db.execute(stmt)
+    token = res.scalar_one_or_none()
+    if not token:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="SCIM token not found.")
+
+    token.is_revoked = True
+    await db.flush()
+
+    await record_audit_log_async(
+        org_id=current_user.organization_id,
+        user_id=current_user.id,
+        action="SCIM_TOKEN_REVOKED",
+        target_type="scim_token",
+        target_id=token.id,
+        details={"name": token.name},
+        db=db
+    )
+    return {"message": "SCIM token successfully revoked."}
 
 def format_scim_user(user: User) -> dict:
     return {

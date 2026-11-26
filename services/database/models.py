@@ -550,9 +550,10 @@ class SCIMToken(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
     organization_id: Mapped[str] = mapped_column(String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(100), default="SCIM Directory Token")
-    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    token_hash: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=get_utc_now)
     expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    is_revoked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
 class UserSession(Base):
     __tablename__ = "user_sessions"
