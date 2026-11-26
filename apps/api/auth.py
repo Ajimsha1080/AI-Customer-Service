@@ -664,6 +664,8 @@ async def get_current_user(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Customer support access has expired."
             )
+        user.organization_id = target_org_id
+        setattr(user, "is_impersonation", True)
         if request:
             request.state.is_support_impersonation = True
             from services.database.audit import record_audit_log_async
@@ -870,20 +872,51 @@ async def get_current_org_user(
         )
     return current_user
 
+def is_break_glass_active(user_id: str, target_org_id: str) -> bool:
+    """Checks whether an approved two-person break-glass session exists in Redis."""
+    try:
+        from services.common.redis_service import get_redis_client_sync
+        r = get_redis_client_sync()
+        if r:
+            val = r.get(f"hac:break_glass_active:{target_org_id}:{user_id}")
+            return bool(val)
+    except Exception:
+        pass
+    return False
+
 def verify_tenant_access(current_user: User, target_org_id: Optional[str]) -> str:
     """Verifies user has permission to access target_org_id.
-    Super Admins can access any organization.
-    Regular users can only access their own organization_id.
-    Zero default fallback to fake or hardcoded organizations.
+    - Regular users can only access their own organization_id.
+    - Super Admins cannot access customer tenants via ?organization_id without consent.
+      Cross-tenant access is restricted to:
+        1. Customer-consented support impersonation (is_impersonation=True), or
+        2. An active, audited two-person break-glass session.
     """
+    resolved_target = target_org_id or current_user.organization_id
+    if not resolved_target:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Organization ID must be explicitly specified."
+        )
+
+    # User belongs to target organization directly
+    if current_user.organization_id and current_user.organization_id == resolved_target:
+        return resolved_target
+
+    # Super Admin cross-tenant validation
     if current_user.role == UserRole.SUPER_ADMIN:
-        resolved = target_org_id or current_user.organization_id
-        if not resolved:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Organization ID must be explicitly specified."
-            )
-        return resolved
+        # Check 1: Consented Impersonation path
+        if getattr(current_user, "is_impersonation", False):
+            return resolved_target
+
+        # Check 2: Audited Two-Person Break-Glass path
+        if is_break_glass_active(current_user.id, resolved_target):
+            return resolved_target
+
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="CROSS_TENANT_ACCESS_DENIED: Cross-tenant access requires customer consent (support impersonation) or an approved two-person break-glass session."
+        )
 
     user_org = current_user.organization_id
     if not user_org:
@@ -892,7 +925,7 @@ def verify_tenant_access(current_user: User, target_org_id: Optional[str]) -> st
             detail="Access denied. User has no assigned organization."
         )
 
-    if target_org_id and target_org_id != user_org:
+    if resolved_target != user_org:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Access denied. You do not have permission to access another organization's resources."

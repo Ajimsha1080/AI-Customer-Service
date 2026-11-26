@@ -2,9 +2,13 @@ import json
 import time
 import uuid
 import asyncio
+import logging
 from datetime import datetime, timezone
 from typing import Optional
+from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Query
+
+logger = logging.getLogger("hospitality_agent_cloud.platform")
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from apps.api.config import settings
 from services.database.session import get_db
 from services.database.models import User, Organization, Agent, IntegrationSource, UserRole, UserSession
+from services.database.audit import record_audit_log_async
 from apps.api.auth import get_super_admin_user, decode_access_token, _hash_token
 from services.realtime.broadcaster import realtime_hub, verify_realtime_ticket, verify_realtime_ticket_async
 
@@ -556,3 +561,129 @@ async def get_localization_ui_strings(locale: str = Query("en")):
     """Returns localized UI strings and RTL direction for guest and staff portal."""
     from services.operations.localization import localization_service
     return localization_service.get_ui_strings(locale)
+
+
+class BreakGlassRequest(BaseModel):
+    organization_id: str
+    reason: str
+
+@router.post("/break-glass/request")
+async def request_break_glass_access(
+    req: BreakGlassRequest,
+    current_user: User = Depends(get_super_admin_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Super Admin requests break-glass emergency access to a customer tenant. Requires a second Super Admin's approval."""
+    if len(req.reason.strip()) < 10:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Justification reason must be at least 10 characters long."
+        )
+
+    stmt = select(Organization).where(Organization.id == req.organization_id)
+    res = await db.execute(stmt)
+    org = res.scalar_one_or_none()
+    if not org:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target organization not found.")
+
+    request_id = str(uuid.uuid4())
+    req_data = {
+        "request_id": request_id,
+        "requester_id": current_user.id,
+        "requester_email": current_user.email,
+        "target_org_id": req.organization_id,
+        "reason": req.reason.strip(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "status": "PENDING"
+    }
+
+    try:
+        from services.common.redis_service import get_redis_client_sync
+        r = get_redis_client_sync()
+        if r:
+            r.set(f"hac:break_glass_req:{request_id}", json.dumps(req_data), ex=3600)
+    except Exception as e:
+        logger.error(f"Failed to store break-glass request in Redis: {e}")
+
+    await record_audit_log_async(
+        org_id=req.organization_id,
+        user_id=current_user.id,
+        action="BREAK_GLASS_REQUESTED",
+        target_type="organization",
+        target_id=req.organization_id,
+        details={"requester_id": current_user.id, "reason": req.reason.strip(), "request_id": request_id},
+        db=db
+    )
+    await db.commit()
+
+    return {
+        "request_id": request_id,
+        "status": "PENDING",
+        "target_org_id": req.organization_id,
+        "message": "Break-glass access requested. A second Super Admin must approve this request."
+    }
+
+@router.post("/break-glass/approve/{request_id}")
+async def approve_break_glass_access(
+    request_id: str,
+    current_user: User = Depends(get_super_admin_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """A second, distinct Super Admin approves a break-glass access request (Strict Two-Person Rule)."""
+    from services.common.redis_service import get_redis_client_sync
+    r = get_redis_client_sync()
+    req_raw = r.get(f"hac:break_glass_req:{request_id}") if r else None
+    if not req_raw:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Break-glass request not found or expired.")
+
+    req_data = json.loads(req_raw) if isinstance(req_raw, str) else json.loads(req_raw.decode())
+    if req_data.get("status") != "PENDING":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Request is already {req_data.get('status')}.")
+
+    # Two-Person Rule Enforcement: Requester cannot approve their own request
+    if req_data.get("requester_id") == current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="TWO_PERSON_RULE_VIOLATION: Break-glass approval requires a second, distinct Super Admin."
+        )
+
+    target_org_id = req_data["target_org_id"]
+    requester_id = req_data["requester_id"]
+
+    # Activate break glass session for 1 hour (3600 seconds)
+    req_data["status"] = "APPROVED"
+    req_data["approver_id"] = current_user.id
+    req_data["approved_at"] = datetime.now(timezone.utc).isoformat()
+    if r:
+        r.set(f"hac:break_glass_req:{request_id}", json.dumps(req_data), ex=3600)
+        r.set(
+            f"hac:break_glass_active:{target_org_id}:{requester_id}",
+            json.dumps({"request_id": request_id, "approved_by": current_user.id}),
+            ex=3600
+        )
+
+    await record_audit_log_async(
+        org_id=target_org_id,
+        user_id=current_user.id,
+        action="BREAK_GLASS_APPROVED",
+        target_type="organization",
+        target_id=target_org_id,
+        details={
+            "request_id": request_id,
+            "requester_id": requester_id,
+            "approver_id": current_user.id,
+            "reason": req_data["reason"]
+        },
+        db=db
+    )
+    await db.commit()
+
+    return {
+        "status": "APPROVED",
+        "target_org_id": target_org_id,
+        "requester_id": requester_id,
+        "approver_id": current_user.id,
+        "expires_in_seconds": 3600,
+        "message": "Break-glass access approved. Requester may now access target organization resources."
+    }
+

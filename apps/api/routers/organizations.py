@@ -3,7 +3,7 @@ import time
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -639,4 +639,38 @@ async def update_security_policy(
         "ip_allowlist": org.ip_allowlist,
         "message": "Security policy updated successfully."
     }
+
+
+@router.get("/organizations/{organization_id}/audit-logs")
+async def get_organization_audit_logs(
+    organization_id: str,
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Allows customer administrators to audit all actions, including support impersonation and break-glass events."""
+    org_id = verify_tenant_access(current_user, organization_id)
+    stmt = (
+        select(AuditLog)
+        .where(AuditLog.organization_id == org_id)
+        .order_by(AuditLog.created_at.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    res = await db.execute(stmt)
+    logs = res.scalars().all()
+    return [
+        {
+            "id": l.id,
+            "action": l.action,
+            "user_id": l.user_id,
+            "target_type": l.target_type,
+            "target_id": l.target_id,
+            "details_json": l.details_json,
+            "created_at": l.created_at.isoformat() if l.created_at else None
+        }
+        for l in logs
+    ]
+
 
