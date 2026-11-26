@@ -68,6 +68,7 @@ class Organization(Base):
     ip_allowlist: Mapped[Optional[list]] = mapped_column(JSON, default=list, nullable=True)
     support_access_granted_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     support_access_granted_by: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    byok_kms_arn: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     data_residency_region: Mapped[str] = mapped_column(String(20), default="US")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=get_utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=get_utc_now, onupdate=get_utc_now)

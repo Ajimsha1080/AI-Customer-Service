@@ -19,6 +19,11 @@ async def prepare_db():
     """Ensure DB schema and clean test fixtures exist for tests."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        if "sqlite" in str(conn.engine.url):
+            res = await conn.execute(text("PRAGMA table_info(organizations)"))
+            cols = [r[1] for r in res.fetchall()]
+            if "byok_kms_arn" not in cols:
+                await conn.execute(text("ALTER TABLE organizations ADD COLUMN byok_kms_arn VARCHAR(512)"))
 
     async with AsyncSessionLocal() as db:
         await db.execute(text("DELETE FROM agents WHERE agent_type NOT IN ('CONCIERGE', 'BOOKING', 'AVAILABILITY', 'SUPPORT', 'ACTIVITIES', 'RESTAURANT', 'VOICE', 'HOSTEL_AI_AGENT')"))

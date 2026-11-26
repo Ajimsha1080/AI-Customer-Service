@@ -12,6 +12,7 @@ from services.database.session import get_db
 from services.database.models import User, ApiKey, WebhookSubscription, WebhookDeliveryLog
 from services.integrations.webhooks import dispatch_customer_webhook
 from services.database.audit import record_audit_log_async
+from services.security.encryption import encrypt_value
 from apps.api.auth import get_current_user, require_permission
 from services.resilience.tenant_limiter import enforce_tenant_fair_use_quota
 from services.database.pagination import paginate_query
@@ -147,7 +148,7 @@ async def subscribe_webhook(
         id=f"whsub_{uuid.uuid4().hex[:12]}",
         organization_id=current_user.organization_id,
         endpoint_url=req.endpoint_url,
-        secret_encrypted=secret,
+        secret_encrypted=encrypt_value(secret, org_id=current_user.organization_id),
         events=req.events,
         is_active=True
     )

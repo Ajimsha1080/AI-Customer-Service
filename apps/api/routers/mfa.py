@@ -13,6 +13,7 @@ from apps.api.config import settings
 from services.database.session import get_db
 from services.database.models import User
 from services.database.audit import record_audit_log_async
+from services.security.encryption import encrypt_value, decrypt_value
 from apps.api.auth import (
     get_current_user, create_access_token, create_refresh_token,
     verify_password, create_user_session, extract_client_ip
@@ -102,7 +103,7 @@ async def enable_mfa(
     raw_recovery_codes = [secrets.token_hex(4).upper() for _ in range(10)]
     hashed_codes = [hashlib.sha256(c.encode("utf-8")).hexdigest() for c in raw_recovery_codes]
 
-    current_user.mfa_secret = req.secret
+    current_user.mfa_secret = encrypt_value(req.secret, org_id=current_user.organization_id)
     current_user.mfa_enabled = True
     current_user.mfa_recovery_codes = hashed_codes
     await db.flush()
@@ -146,7 +147,8 @@ async def verify_mfa_login(
 
     # Check TOTP
     if user.mfa_secret:
-        totp = pyotp.TOTP(user.mfa_secret)
+        raw_secret = decrypt_value(user.mfa_secret, org_id=user.organization_id)
+        totp = pyotp.TOTP(raw_secret)
         if totp.verify(req.code.strip(), valid_window=1):
             verified = True
 
@@ -232,7 +234,8 @@ async def disable_mfa(
             detail="MFA is not enabled on this account."
         )
 
-    totp = pyotp.TOTP(current_user.mfa_secret)
+    raw_secret = decrypt_value(current_user.mfa_secret, org_id=current_user.organization_id)
+    totp = pyotp.TOTP(raw_secret)
     if not totp.verify(req.code, valid_window=1):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

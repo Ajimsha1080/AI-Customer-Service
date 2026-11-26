@@ -86,6 +86,12 @@ class Settings(BaseSettings):
     LLM_TIMEOUT_SECONDS: float = 15.0
     DEFAULT_LLM_MODEL: str = "gpt-4o-mini"
 
+    # Enterprise Security & KMS Envelope Encryption (Phase F2 / H9)
+    KMS_PROVIDER: str = "aws_kms"
+    KMS_PRIMARY_KEY_ID: Optional[str] = None
+    KMS_REGION: str = "us-east-1"
+    DATA_RESIDENCY_REGION: str = "US"
+
     @property
     def is_production(self) -> bool:
         return self.ENVIRONMENT.lower() in ("production", "prod")
@@ -210,6 +216,10 @@ class Settings(BaseSettings):
             raise ValueError("CRITICAL SECURITY RISK: CORS_ORIGINS must be explicitly configured in production without wildcards!")
         if self.EMAIL_SERVICE_PROVIDER.lower() in ("console", _kw, "dummy"):
             raise ValueError("CRITICAL SECURITY RISK: EMAIL_SERVICE_PROVIDER cannot be 'console' or placeholder in production!")
+
+        # 7. AWS KMS Envelope Encryption (H9)
+        if self.KMS_PROVIDER.lower() != "aws_kms" or is_insecure(self.KMS_PRIMARY_KEY_ID):
+            raise ValueError("CRITICAL SECURITY RISK: KMS_PRIMARY_KEY_ID must be configured as a real AWS KMS Key ARN in production!")
 
         return self
 

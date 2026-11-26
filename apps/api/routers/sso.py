@@ -15,6 +15,7 @@ from apps.api.config import settings
 from services.database.session import get_db, set_tenant_context
 from services.database.models import User, Organization, UserRole, SSOConfig
 from services.database.audit import record_audit_log_async
+from services.security.encryption import encrypt_value, decrypt_value
 from apps.api.auth import (
     get_current_user, create_access_token, create_refresh_token,
     create_user_session, require_role, require_permission, extract_client_ip
@@ -147,7 +148,7 @@ async def update_sso_config(
     config.idp_x509_cert = req.idp_x509_cert
     config.client_id = req.client_id
     if req.client_secret:
-        config.client_secret_encrypted = req.client_secret
+        config.client_secret_encrypted = encrypt_value(req.client_secret, org_id=config.organization_id)
     config.enforce_sso = req.enforce_sso
     config.jit_provisioning_enabled = req.jit_provisioning_enabled
     # Prevent setting default role to SUPER_ADMIN
@@ -480,7 +481,7 @@ async def oidc_sso_callback(
             code_verifier=code_verifier,
             redirect_uri=redirect_uri,
             client_id=config.client_id or "",
-            client_secret=config.client_secret_encrypted
+            client_secret=decrypt_value(config.client_secret_encrypted, org_id=config.organization_id) if config.client_secret_encrypted else None
         )
     except OIDCValidationError as e:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=f"OIDC code exchange failed: {e}")

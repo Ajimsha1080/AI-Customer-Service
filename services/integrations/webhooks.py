@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from services.database.models import WebhookSubscription, WebhookDeliveryLog
+from services.security.encryption import decrypt_value
 
 logger = logging.getLogger("hospitality_agent_cloud.integrations.webhooks")
 
@@ -55,7 +56,8 @@ async def dispatch_customer_webhook(
     }
     raw_json = json.dumps(envelope)
     payload_bytes = raw_json.encode("utf-8")
-    sig_header = generate_webhook_signature(subscription.secret_encrypted, payload_bytes, now_ts)
+    raw_secret = decrypt_value(subscription.secret_encrypted, org_id=subscription.organization_id)
+    sig_header = generate_webhook_signature(raw_secret, payload_bytes, now_ts)
 
     delivery_id = f"del_{uuid.uuid4().hex[:12]}"
     status_code = 200
