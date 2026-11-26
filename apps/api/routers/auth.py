@@ -500,7 +500,8 @@ async def logout(req: LogoutRequest, response: Response, db: AsyncSession = Depe
     return {"message": "Successfully logged out and token invalidated."}
 
 @router.post("/refresh")
-async def refresh(req: RefreshTokenRequest, db: AsyncSession = Depends(get_db)):
+async def refresh(req: RefreshTokenRequest, request: Request, response: Response, db: AsyncSession = Depends(get_db)):
+    """Rotates refresh token on every use, detecting token reuse and revoking the family."""
     payload = await decode_refresh_token_async(req.refresh_token, db=db)
     user_id = payload.get("sub")
     if not user_id:
@@ -512,10 +513,34 @@ async def refresh(req: RefreshTokenRequest, db: AsyncSession = Depends(get_db)):
     if not user or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User account not found or inactive")
 
+    family_id = payload.get("family_id") or str(uuid.uuid4())
+
+    # 1. Immediately revoke the presented refresh token and associate with family
+    await revoke_refresh_token(req.refresh_token, db=db, family_id=family_id)
+
+    # 2. Issue new access token + new rotated refresh token with the same family_id
     role_val = user.role.value if hasattr(user.role, "value") else str(user.role)
-    new_access_token = create_access_token({"sub": user.id, "org_id": user.organization_id, "role": role_val})
-    new_refresh_token = create_refresh_token({"sub": user.id})
-    await revoke_refresh_token(req.refresh_token, db=db)
+    new_access_token = create_access_token({
+        "sub": user.id,
+        "org_id": user.organization_id,
+        "role": role_val,
+        "is_login": True
+    })
+    new_refresh_token = create_refresh_token({"sub": user.id, "family_id": family_id})
+
+    # 3. Create active session row for new access token
+    client_ip = extract_client_ip(request)
+    user_agent = request.headers.get("User-Agent")
+    await create_user_session(
+        db=db,
+        user_id=user.id,
+        org_id=user.organization_id,
+        access_token=new_access_token,
+        ip_address=client_ip,
+        user_agent=user_agent
+    )
+
+    set_auth_cookies(response, new_access_token, new_refresh_token)
 
     return {
         "access_token": new_access_token,

@@ -175,12 +175,13 @@ async def reset_login_failures(identifier: str, client_ip: Optional[str] = None)
     await redis.delete(key, lockout_key)
 
 def create_refresh_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
-    """Generates a signed JWT refresh token with unique jti and 7 day default expiry."""
+    """Generates a signed JWT refresh token with unique jti, family_id and 7 day default expiry."""
     to_encode = data.copy()
     now = datetime.now(timezone.utc)
     expire = now + (expires_delta or timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS))
+    to_encode.setdefault("jti", str(uuid.uuid4()))
+    to_encode.setdefault("family_id", str(uuid.uuid4()))
     to_encode.update({
-        "jti": str(uuid.uuid4()),
         "exp": expire,
         "iat": now,
         "token_type": "refresh"
@@ -210,41 +211,81 @@ def decode_access_token(token: str) -> dict:
             headers={"WWW-Authenticate": "Bearer"}
         )
 
-async def revoke_refresh_token(token: str, db: Optional[AsyncSession] = None):
-    """Revokes a refresh token in Redis and persists hashed token to database."""
-    h = _hash_token(token)
+async def revoke_token_hash(token_hash: str, db: Optional[AsyncSession] = None):
+    """Directly revokes a pre-computed token hash in Redis and DB without double-hashing."""
     from services.common.redis_service import get_redis_client
     redis = await get_redis_client()
-    await redis.set(f"hac:denylist:{h}", "1", ex=7 * 86400)
-    await redis.set(f"hac:denylist:{token}", "1", ex=7 * 86400)
+    await redis.set(f"hac:denylist:{token_hash}", "1", ex=7 * 86400)
     if db:
-        stmt = select(RevokedToken).where((RevokedToken.token == h) | (RevokedToken.token == token))
+        stmt = select(RevokedToken).where(RevokedToken.token == token_hash)
         res = await db.execute(stmt)
         if not res.scalar_one_or_none():
-            rev = RevokedToken(token=h)
+            rev = RevokedToken(token=token_hash)
             db.add(rev)
             await db.flush()
 
+async def revoke_refresh_token(token: str, db: Optional[AsyncSession] = None, family_id: Optional[str] = None):
+    """Revokes a refresh token in Redis and persists hashed token to database."""
+    h = _hash_token(token)
+    await revoke_token_hash(h, db=db)
+    from services.common.redis_service import get_redis_client
+    redis = await get_redis_client()
+    await redis.set(f"hac:denylist:{token}", "1", ex=7 * 86400)
+    if family_id:
+        await redis.set(f"hac:revoked_token_family:{h}", family_id, ex=7 * 86400)
+        await redis.set(f"hac:revoked_token_family:{token}", family_id, ex=7 * 86400)
+
 async def decode_refresh_token_async(token: str, db: Optional[AsyncSession] = None) -> dict:
-    """Decodes and validates a JWT refresh token with persistent Redis and DB revocation checks."""
+    """Decodes and validates a JWT refresh token with persistent Redis and DB revocation checks,
+    and automatic token family reuse detection."""
     h = _hash_token(token)
     from services.common.redis_service import get_redis_client
     redis = await get_redis_client()
-    if await redis.get(f"hac:denylist:{h}") or await redis.get(f"hac:denylist:{token}"):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token has been revoked or reuse detected."
-        )
-    if db:
+
+    is_revoked = bool(await redis.get(f"hac:denylist:{h}") or await redis.get(f"hac:denylist:{token}"))
+    if not is_revoked and db:
         stmt = select(RevokedToken).where((RevokedToken.token == h) | (RevokedToken.token == token))
         res = await db.execute(stmt)
         if res.scalar_one_or_none():
-            await redis.set(f"hac:denylist:{h}", "1", ex=7 * 86400)
+            is_revoked = True
+
+    if is_revoked:
+        # REUSE DETECTED: This token was already revoked/consumed! Invalidate entire token family!
+        fam_id = await redis.get(f"hac:revoked_token_family:{h}") or await redis.get(f"hac:revoked_token_family:{token}")
+        if not fam_id:
+            try:
+                unverified = jwt.decode(token, settings.JWT_REFRESH_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM], options={"verify_exp": False, "verify_signature": False})
+                fam_id = unverified.get("family_id")
+            except Exception:
+                pass
+
+        if fam_id:
+            fam_str = fam_id.decode() if isinstance(fam_id, bytes) else str(fam_id)
+            await redis.set(f"hac:family_revoked:{fam_str}", "1", ex=7 * 86400)
+            if db:
+                try:
+                    unverified = jwt.decode(token, settings.JWT_REFRESH_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM], options={"verify_exp": False, "verify_signature": False})
+                    uid = unverified.get("sub")
+                    if uid:
+                        await revoke_all_user_sessions(db, uid)
+                except Exception:
+                    pass
+
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token reuse detected. All sessions in this token family have been revoked."
+        )
+
+    # Decode valid token
+    payload = decode_refresh_token(token)
+    family_id = payload.get("family_id")
+    if family_id:
+        if await redis.get(f"hac:family_revoked:{family_id}"):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Token has been revoked or reuse detected."
+                detail="Token family has been invalidated due to token reuse."
             )
-    return decode_refresh_token(token)
+    return payload
 
 def decode_refresh_token(token: str) -> dict:
     """Decodes and validates a JWT refresh token."""
@@ -261,13 +302,28 @@ def decode_refresh_token(token: str) -> dict:
         raise
     except Exception:
         pass
+
     try:
         payload = jwt.decode(token, settings.JWT_REFRESH_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
         if payload.get("token_type") != "refresh":
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid token type. Refresh token required."
+                detail="Invalid token type. Only refresh tokens accepted."
             )
+        family_id = payload.get("family_id")
+        if family_id:
+            try:
+                from services.common.redis_service import get_redis_client_sync
+                redis_sync = get_redis_client_sync()
+                if redis_sync.get(f"hac:family_revoked:{family_id}"):
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="Token family has been invalidated due to token reuse."
+                    )
+            except HTTPException:
+                raise
+            except Exception:
+                pass
         return payload
     except JWTError:
         raise HTTPException(
@@ -381,13 +437,13 @@ async def create_user_session(
     return session
 
 async def revoke_user_session(db: AsyncSession, session_id: str, user_id: str) -> bool:
-    """Revokes a specific session remotely."""
+    """Revokes a specific session remotely without double-hashing session_token_hash."""
     stmt = select(UserSession).where(UserSession.id == session_id, UserSession.user_id == user_id)
     res = await db.execute(stmt)
     sess = res.scalar_one_or_none()
     if sess:
         sess.is_revoked = True
-        await revoke_refresh_token(sess.session_token_hash, db=db)
+        await revoke_token_hash(sess.session_token_hash, db=db)
         await db.flush()
         return True
     return False
@@ -402,7 +458,7 @@ async def revoke_all_user_sessions(db: AsyncSession, user_id: str, except_token_
     count = 0
     for s in sessions:
         s.is_revoked = True
-        await revoke_refresh_token(s.session_token_hash, db=db)
+        await revoke_token_hash(s.session_token_hash, db=db)
         count += 1
     await db.flush()
     return count
