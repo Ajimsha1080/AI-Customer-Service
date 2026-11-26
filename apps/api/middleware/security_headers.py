@@ -1,3 +1,4 @@
+import secrets
 import logging
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -8,25 +9,31 @@ logger = logging.getLogger("hospitality_agent_cloud.middleware.security_headers"
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     """
     Enterprise HTTP Security Headers Middleware:
-    Enforces HSTS, Strict CSP, nosniff, DENY frame options, Referrer-Policy, and Permissions-Policy.
+    Enforces HSTS, Strict CSP with dynamic cryptographic nonce, nosniff, DENY frame options,
+    strict Referrer-Policy, and restricted Permissions-Policy (camera, microphone, geolocation).
     """
     async def dispatch(self, request: Request, call_next):
+        # Generate cryptographic nonce for per-request CSP protection
+        nonce = secrets.token_urlsafe(16)
+        request.state.csp_nonce = nonce
+
         response: Response = await call_next(request)
 
-        # 1. HTTP Strict Transport Security (HSTS) with 2-year duration and preload
-        response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains; preload"
+        # 1. HTTP Strict Transport Security (HSTS) with at least 1-year duration and preload
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains; preload"
 
-        # 2. Content Security Policy (CSP)
+        # 2. Content Security Policy (CSP) with dynamic per-request nonce
         response.headers["Content-Security-Policy"] = (
-            "default-src 'self'; "
-            "script-src 'self' 'unsafe-inline'; "
-            "style-src 'self' 'unsafe-inline'; "
-            "img-src 'self' data: https:; "
-            "font-src 'self' data:; "
-            "connect-src 'self' https: wss:; "
-            "frame-ancestors 'none'; "
-            "base-uri 'self'; "
-            "form-action 'self';"
+            f"default-src 'self'; "
+            f"script-src 'self' 'nonce-{nonce}'; "
+            f"style-src 'self' 'unsafe-inline'; "
+            f"img-src 'self' data: https:; "
+            f"font-src 'self' data:; "
+            f"connect-src 'self' https: wss:; "
+            f"frame-ancestors 'none'; "
+            f"base-uri 'self'; "
+            f"form-action 'self'; "
+            f"object-src 'none';"
         )
 
         # 3. MIME Sniffing Protection
@@ -38,7 +45,10 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         # 5. Referrer Policy
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
 
-        # 6. Permissions Policy (Disables browser APIs not required)
-        response.headers["Permissions-Policy"] = "camera=(), geolocation=(), payment=()"
+        # 6. Permissions Policy (Disables browser APIs: camera, microphone, geolocation)
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(), payment=()"
+
+        # 7. Cross-Origin Protections
+        response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
 
         return response
