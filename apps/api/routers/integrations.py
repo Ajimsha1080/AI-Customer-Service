@@ -8,7 +8,7 @@ logger = logging.getLogger("hospitality_agent_cloud.integrations")
 from typing import Optional, List, Dict
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Query, UploadFile, File, Form, BackgroundTasks
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 import io
 
@@ -36,7 +36,7 @@ def extract_text_from_file_bytes(filename: str, content_bytes: bytes) -> str:
 
 from services.database.session import get_db, set_tenant_context
 from services.database.models import (
-    User, KnowledgeDocument, LiveUpdate, IntegrationSource, DataAccessPolicy,
+    User, KnowledgeDocument, Document, LiveUpdate, IntegrationSource, DataAccessPolicy,
     AuditLog, Agent, AgentStatus, AgentConfig, Organization, UserSession,
     WhatsAppChannelMapping, ProcessedWebhookEvent
 )
@@ -146,7 +146,7 @@ async def upload_knowledge_document(req: KnowledgeDocumentRequest, current_user:
         status="PENDING"
     )
     db.add(doc)
-    await db.flush()
+    await db.commit()
 
     try:
         await rag_service.add_document_async(doc_id, req.title, req.content, {
@@ -260,13 +260,60 @@ async def delete_knowledge_document(
     if not doc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Document '{document_id}' not found.")
 
+    from services.database.models import DocumentChunk
+    await db.execute(delete(DocumentChunk).where(DocumentChunk.document_id == doc.id))
     await db.delete(doc)
-    await db.flush()
+    await db.commit()
 
     return {
         "document_id": document_id,
         "deleted": True,
         "message": f"Document '{doc.title}' deleted successfully."
+    }
+
+class UpdateKnowledgeDocumentRequest(BaseModel):
+    organization_id: str
+    property_id: str
+    title: Optional[str] = None
+    content: Optional[str] = None
+
+@router.put("/api/v1/knowledge/documents/{document_id}", tags=["Knowledge Base & RAG"])
+@router.put("/api/v1/rag/documents/{document_id}", tags=["Knowledge Base & RAG"])
+async def update_knowledge_document(
+    document_id: str,
+    req: UpdateKnowledgeDocumentRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Re-indexes an existing document on update (cleans old chunks, generates new chunks, embeds and re-indexes)."""
+    org_id = verify_tenant_access(current_user, req.organization_id)
+    stmt = select(Document).where(Document.id == document_id, Document.organization_id == org_id)
+    res = await db.execute(stmt)
+    doc = res.scalar_one_or_none()
+    if not doc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Document '{document_id}' not found.")
+
+    new_title = req.title or doc.title
+    new_content = req.content or doc.content
+
+    try:
+        await rag_service.reindex_document_async(
+            doc_id=doc.id,
+            title=new_title,
+            content=new_content,
+            organization_id=org_id,
+            property_id=req.property_id,
+            metadata={"document_type": getattr(doc, "document_type", "txt")}
+        )
+    except Exception as e:
+        logger.error(f"Error during document re-indexing: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Reindexing failed: {e}")
+
+    return {
+        "id": doc.id,
+        "title": new_title,
+        "status": "INDEXED",
+        "message": "Document re-indexed successfully."
     }
 
 class RAGQueryRequest(BaseModel):
@@ -278,7 +325,9 @@ class RAGQueryRequest(BaseModel):
 @router.post("/api/v1/rag/query", tags=["Knowledge Base & RAG"])
 async def query_knowledge_base(req: RAGQueryRequest, current_user: User = Depends(get_current_user)):
     org_id = verify_tenant_access(current_user, req.organization_id)
-    results = await rag_service.similarity_search(req.query, top_k=req.top_k, organization_id=org_id, property_id=req.property_id)
+    if not req.query or not req.query.strip():
+        return {"query": req.query, "results": []}
+    results = await rag_service.hybrid_search_async(req.query, top_k=req.top_k, organization_id=org_id, property_id=req.property_id)
     return {"query": req.query, "results": results}
 
 # --- LIVE ANNOUNCEMENTS & INTEGRATION SOURCES ---

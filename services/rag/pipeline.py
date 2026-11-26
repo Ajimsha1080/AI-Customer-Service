@@ -168,9 +168,16 @@ class RAGPipeline:
             top_k=top_k * 2
         )
 
-        # Keyword BM25-style fallback search
+        # Keyword BM25-style search
         keyword_results = []
-        if len(queries) > 1:
+        if hasattr(self.vector_store, "bm25_search_async"):
+            keyword_results = await self.vector_store.bm25_search_async(
+                query=primary_query,
+                organization_id=organization_id,
+                property_id=property_id,
+                top_k=top_k * 2
+            )
+        elif len(queries) > 1:
             keyword_results = await self.vector_store.similarity_search(
                 query=queries[1],
                 organization_id=organization_id,

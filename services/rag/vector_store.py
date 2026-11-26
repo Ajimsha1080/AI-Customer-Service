@@ -1,7 +1,9 @@
 import uuid
 import time
 import math
+import re
 import asyncio
+from collections import Counter
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional
 from sqlalchemy import select, delete
@@ -9,6 +11,81 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from services.database.session import AsyncSessionLocal
 from services.database.models import Document, DocumentChunk
 from services.rag.embeddings import BaseEmbeddingProvider, get_embedding_provider, LocalHashedEmbeddingProvider
+
+def compute_bm25_scores(query: str, corpus: List[Dict[str, Any]], k1: float = 1.5, b: float = 0.75) -> List[Dict[str, Any]]:
+    """Computes BM25 ranking scores over a corpus of document chunks."""
+    if not corpus or not query:
+        return []
+
+    def tokenize(text: str) -> List[str]:
+        return re.findall(r'\b\w+\b', text.lower())
+
+    query_tokens = tokenize(query)
+    if not query_tokens:
+        return []
+
+    doc_tokens = [tokenize(doc.get("content", "")) for doc in corpus]
+    doc_lens = [len(tokens) for tokens in doc_tokens]
+    n_docs = len(corpus)
+    avgdl = sum(doc_lens) / (n_docs or 1)
+
+    df = Counter()
+    for tokens in doc_tokens:
+        unique_tokens = set(tokens)
+        for qt in query_tokens:
+            if qt in unique_tokens:
+                df[qt] += 1
+
+    results = []
+    for doc, tokens, doc_len in zip(corpus, doc_tokens, doc_lens):
+        tf = Counter(tokens)
+        score = 0.0
+        for qt in query_tokens:
+            if qt not in tf:
+                continue
+            doc_freq = df[qt]
+            idf = math.log(1.0 + (n_docs - doc_freq + 0.5) / (doc_freq + 0.5))
+            term_tf = tf[qt]
+            denom = term_tf + k1 * (1.0 - b + b * (doc_len / (avgdl or 1.0)))
+            score += idf * (term_tf * (k1 + 1.0) / (denom or 1.0))
+
+        if score > 0:
+            doc_res = doc.copy()
+            doc_res["bm25_score"] = round(score, 4)
+            doc_res["score"] = round(score, 4)
+            results.append(doc_res)
+
+    results.sort(key=lambda x: x["score"], reverse=True)
+    return results
+
+def reciprocal_rank_fusion(
+    vector_results: List[Dict[str, Any]],
+    bm25_results: List[Dict[str, Any]],
+    k: int = 60
+) -> List[Dict[str, Any]]:
+    """Fuses dense vector rankings and BM25 keyword rankings using RRF."""
+    rrf_scores: Dict[str, float] = {}
+    item_map: Dict[str, Dict[str, Any]] = {}
+
+    for rank, item in enumerate(vector_results, start=1):
+        doc_id = item["id"]
+        rrf_scores[doc_id] = rrf_scores.get(doc_id, 0.0) + (1.0 / (k + rank))
+        item_map[doc_id] = item
+
+    for rank, item in enumerate(bm25_results, start=1):
+        doc_id = item["id"]
+        rrf_scores[doc_id] = rrf_scores.get(doc_id, 0.0) + (1.0 / (k + rank))
+        if doc_id not in item_map:
+            item_map[doc_id] = item
+
+    sorted_ids = sorted(rrf_scores.keys(), key=lambda x: rrf_scores[x], reverse=True)
+    fused = []
+    for doc_id in sorted_ids:
+        entry = item_map[doc_id].copy()
+        entry["rrf_score"] = round(rrf_scores[doc_id], 6)
+        entry["score"] = round(rrf_scores[doc_id], 6)
+        fused.append(entry)
+    return fused
 
 class VectorStoreInterface(ABC):
     @abstractmethod
@@ -154,6 +231,7 @@ class PostgresPgVectorStore(VectorStoreInterface):
                 return False
 
             for target in target_docs:
+                await session.execute(delete(DocumentChunk).where(DocumentChunk.document_id == target.id))
                 await session.delete(target)
 
             await session.commit()
@@ -166,6 +244,8 @@ class PostgresPgVectorStore(VectorStoreInterface):
                 await session.close()
 
     async def similarity_search(self, query: str, organization_id: str, property_id: str, agent_id: Optional[str] = None, top_k: int = 5) -> List[Dict[str, Any]]:
+        if not query or not query.strip() or not organization_id:
+            return []
         session, is_local_session = await self._get_session()
         query_vec = await self.embedder.embed_text_async(query)
 
@@ -230,7 +310,7 @@ class PostgresPgVectorStore(VectorStoreInterface):
 
 class RAGVectorService(PostgresPgVectorStore):
     """Production RAG Vector Service performing genuine document chunking, embedding,
-    storage, and semantic similarity search with zero fake stubs.
+    storage, hybrid BM25 + vector search with Reciprocal Rank Fusion, and re-indexing.
     """
     async def add_document_async(self, doc_id: str, title: str, content: str, metadata: dict) -> List[str]:
         org_id = metadata.get("organization_id", "")
@@ -238,14 +318,14 @@ class RAGVectorService(PostgresPgVectorStore):
         agent_id = metadata.get("agent_id")
         doc_type = metadata.get("document_type", "txt")
 
-        # Chunk document text (250 words per chunk with 30 word overlap)
+        # Chunk document text: 500 words per chunk with 50 word overlap (500-1000 tokens)
         words = content.split()
         chunks = []
         if not words:
             chunks = [content]
         else:
-            chunk_size = 250
-            overlap = 30
+            chunk_size = 500
+            overlap = 50
             i = 0
             while i < len(words):
                 chunk_text = " ".join(words[i:i + chunk_size])
@@ -272,6 +352,75 @@ class RAGVectorService(PostgresPgVectorStore):
 
         return await self.add_documents(docs_to_add, organization_id=org_id, property_id=prop_id, agent_id=agent_id)
 
+    async def bm25_search_async(self, query: str, organization_id: str, property_id: str, top_k: int = 5) -> List[Dict[str, Any]]:
+        """Performs BM25 keyword search over chunks scoped strictly by organization_id and property_id."""
+        if not query or not query.strip() or not organization_id:
+            return []
+        session, is_local = await self._get_session()
+        try:
+            stmt = select(DocumentChunk).join(Document, DocumentChunk.document_id == Document.id).where(
+                Document.organization_id == organization_id,
+                Document.property_id == property_id
+            )
+            res = await session.execute(stmt)
+            chunks = res.scalars().all()
+            corpus = [
+                {
+                    "id": c.id,
+                    "content": c.content,
+                    "metadata": c.metadata_json or {},
+                    "document_id": c.document_id
+                }
+                for c in chunks
+            ]
+            return compute_bm25_scores(query, corpus, k1=1.5, b=0.75)[:top_k]
+        finally:
+            if is_local:
+                await session.close()
+
+    async def hybrid_search_async(self, query: str, organization_id: str, property_id: str, top_k: int = 5) -> List[Dict[str, Any]]:
+        """Hybrid search combining vector similarity and BM25 keyword search using Reciprocal Rank Fusion (RRF)."""
+        if not query or not query.strip() or not organization_id:
+            return []
+
+        vector_results = await self.similarity_search(
+            query=query,
+            organization_id=organization_id,
+            property_id=property_id,
+            top_k=top_k * 2
+        )
+        bm25_results = await self.bm25_search_async(
+            query=query,
+            organization_id=organization_id,
+            property_id=property_id,
+            top_k=top_k * 2
+        )
+
+        fused = reciprocal_rank_fusion(vector_results, bm25_results, k=60)
+        return fused[:top_k]
+
+    async def reindex_document_async(self, doc_id: str, title: str, content: str, organization_id: str, property_id: str, metadata: dict) -> List[str]:
+        """Re-indexes an existing document on update: cleans old chunks, generates new chunks, embeds, and updates metadata."""
+        session, is_local = await self._get_session()
+        try:
+            stmt = select(Document).where(Document.id == doc_id, Document.organization_id == organization_id)
+            res = await session.execute(stmt)
+            doc_record = res.scalar_one_or_none()
+            if doc_record:
+                doc_record.title = title
+                doc_record.content = content
+                doc_record.content_raw = content
+                doc_record.status = "INDEXED"
+
+            # Delete old chunks
+            await session.execute(delete(DocumentChunk).where(DocumentChunk.document_id == doc_id))
+            await session.commit()
+        finally:
+            if is_local:
+                await session.close()
+
+        return await self.add_document_async(doc_id, title, content, {**metadata, "organization_id": organization_id, "property_id": property_id})
+
     def add_document(self, doc_id: str, title: str, content: str, metadata: dict):
         try:
             loop = asyncio.get_running_loop()
@@ -281,12 +430,11 @@ class RAGVectorService(PostgresPgVectorStore):
             return asyncio.run(self.add_document_async(doc_id, title, content, metadata))
 
     async def search_async(self, query: str, top_k: int = 3, organization_id: str = "", property_id: str = "") -> List[Dict[str, Any]]:
-        return await self.similarity_search(query=query, organization_id=organization_id, property_id=property_id, top_k=top_k)
+        return await self.hybrid_search_async(query=query, organization_id=organization_id, property_id=property_id, top_k=top_k)
 
     def search(self, query: str, top_k: int = 3, organization_id: str = "", property_id: str = "") -> List[Dict[str, Any]]:
         try:
             loop = asyncio.get_running_loop()
-            # If inside running event loop, we create a concurrent future or run synchronous similarity over session
             import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor() as pool:
                 return pool.submit(asyncio.run, self.search_async(query, top_k, organization_id, property_id)).result()
