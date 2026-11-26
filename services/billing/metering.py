@@ -8,11 +8,26 @@ from services.database.models import UsageEvent, Subscription, Agent, Document, 
 
 class UsageMeteringService:
     PLAN_LIMITS = {
-        "FREE": {"max_agents": 1, "max_properties": 1, "max_conversations": 100, "max_documents": 5, "max_seats": 1, "monthly_price": 0.0, "voice_enabled": False},
-        "STARTER": {"max_agents": 2, "max_properties": 1, "max_conversations": 1000, "max_documents": 10, "max_seats": 2, "monthly_price": 49.0, "voice_enabled": False},
-        "PROFESSIONAL": {"max_agents": 5, "max_properties": 2, "max_conversations": 10000, "max_documents": 50, "max_seats": 5, "monthly_price": 199.0, "voice_enabled": True},
-        "BUSINESS": {"max_agents": 15, "max_properties": 5, "max_conversations": 50000, "max_documents": 200, "max_seats": 20, "monthly_price": 499.0, "voice_enabled": True},
-        "ENTERPRISE": {"max_agents": 999, "max_properties": 999, "max_conversations": 9999999, "max_documents": 5000, "max_seats": 9999, "monthly_price": 1999.0, "voice_enabled": True}
+        "FREE": {
+            "max_agents": 1, "max_properties": 1, "max_conversations": 100, "max_documents": 5, "max_seats": 1, "monthly_price": 0.0, "voice_enabled": False,
+            "max_tokens": 50000, "max_voice_minutes": 0, "max_whatsapp_messages": 50
+        },
+        "STARTER": {
+            "max_agents": 2, "max_properties": 1, "max_conversations": 1000, "max_documents": 10, "max_seats": 2, "monthly_price": 49.0, "voice_enabled": False,
+            "max_tokens": 500000, "max_voice_minutes": 0, "max_whatsapp_messages": 500
+        },
+        "PROFESSIONAL": {
+            "max_agents": 5, "max_properties": 2, "max_conversations": 10000, "max_documents": 50, "max_seats": 5, "monthly_price": 199.0, "voice_enabled": True,
+            "max_tokens": 2000000, "max_voice_minutes": 100, "max_whatsapp_messages": 2500
+        },
+        "BUSINESS": {
+            "max_agents": 15, "max_properties": 5, "max_conversations": 50000, "max_documents": 200, "max_seats": 20, "monthly_price": 499.0, "voice_enabled": True,
+            "max_tokens": 10000000, "max_voice_minutes": 500, "max_whatsapp_messages": 10000
+        },
+        "ENTERPRISE": {
+            "max_agents": 999, "max_properties": 999, "max_conversations": 9999999, "max_documents": 5000, "max_seats": 9999, "monthly_price": 1999.0, "voice_enabled": True,
+            "max_tokens": 100000000, "max_voice_minutes": 5000, "max_whatsapp_messages": 100000
+        }
     }
 
     MODEL_PRICING = {
@@ -442,11 +457,151 @@ class UsageMeteringService:
                 if not voice_allowed:
                     return False, f"Voice Gateway is disabled on the '{plan_name}' plan. Please upgrade to Professional or higher.", {"current": 0, "limit": 0, "plan": plan_name}
 
+            elif resource in ["tokens", "llm_tokens"]:
+                max_allowed = limits.get("max_tokens", 50000)
+                redis_tokens = await self.get_metered_usage_redis(organization_id, "tokens")
+                db_tokens = 0
+                if session:
+                    stmt = select(func.sum(UsageEvent.quantity)).where(
+                        UsageEvent.organization_id == organization_id,
+                        UsageEvent.unit == "tokens",
+                        UsageEvent.created_at >= billing_period_start,
+                        UsageEvent.created_at < billing_period_end
+                    )
+                    res = await session.execute(stmt)
+                    db_tokens = res.scalar() or 0
+                current_usage = int(redis_tokens + db_tokens)
+                if current_usage >= max_allowed:
+                    return False, f"LLM token quota exceeded ({current_usage}/{max_allowed} tokens) for plan '{plan_name}'", {"current": current_usage, "limit": max_allowed, "plan": plan_name}
+
+            elif resource in ["voice_minutes", "minutes"]:
+                max_allowed = limits.get("max_voice_minutes", 0)
+                if max_allowed == 0:
+                    return False, f"Voice minutes not included in plan '{plan_name}'. Please upgrade to Professional or higher.", {"current": 0, "limit": 0, "plan": plan_name}
+                redis_mins = await self.get_metered_usage_redis(organization_id, "voice_minutes")
+                db_mins = 0
+                if session:
+                    stmt = select(func.sum(UsageEvent.quantity)).where(
+                        UsageEvent.organization_id == organization_id,
+                        UsageEvent.unit == "minutes",
+                        UsageEvent.created_at >= billing_period_start,
+                        UsageEvent.created_at < billing_period_end
+                    )
+                    res = await session.execute(stmt)
+                    db_mins = res.scalar() or 0
+                current_usage = int(redis_mins + db_mins)
+                if current_usage >= max_allowed:
+                    return False, f"Voice minutes quota exceeded ({current_usage}/{max_allowed} minutes) for plan '{plan_name}'", {"current": current_usage, "limit": max_allowed, "plan": plan_name}
+
+            elif resource in ["whatsapp_messages", "whatsapp", "messages"]:
+                max_allowed = limits.get("max_whatsapp_messages", 50)
+                redis_msgs = await self.get_metered_usage_redis(organization_id, "whatsapp_messages")
+                db_msgs = 0
+                if session:
+                    stmt = select(func.sum(UsageEvent.quantity)).where(
+                        UsageEvent.organization_id == organization_id,
+                        UsageEvent.unit.in_(["messages", "whatsapp_messages"]),
+                        UsageEvent.created_at >= billing_period_start,
+                        UsageEvent.created_at < billing_period_end
+                    )
+                    res = await session.execute(stmt)
+                    db_msgs = res.scalar() or 0
+                current_usage = int(redis_msgs + db_msgs)
+                if current_usage >= max_allowed:
+                    return False, f"WhatsApp message quota exceeded ({current_usage}/{max_allowed} messages) for plan '{plan_name}'", {"current": current_usage, "limit": max_allowed, "plan": plan_name}
+
         finally:
             if is_local and session:
                 await session.close()
 
         return True, "Quota check passed", {"current": current_usage, "plan": plan_name}
+
+    async def record_usage_redis(
+        self,
+        organization_id: str,
+        resource: str,
+        quantity: int = 1,
+        agent_id: Optional[str] = None,
+        property_id: Optional[str] = None,
+        unit: Optional[str] = None
+    ) -> int:
+        """Atomically meters usage in Redis per tenant and enqueues event for 5-minute database sync."""
+        from services.common.redis_service import get_redis_client
+        import json
+        client = await get_redis_client()
+        key = f"hac:metering:{organization_id}:{resource}"
+        new_total = await client.incrby(key, quantity)
+        await client.sadd("hac:metering:active_tenants", organization_id)
+        event_payload = json.dumps({
+            "id": f"evt_{uuid.uuid4().hex[:10]}",
+            "organization_id": organization_id,
+            "property_id": property_id or "prop_default",
+            "agent_id": agent_id or "agent_default",
+            "event_type": resource,
+            "quantity": quantity,
+            "unit": unit or resource,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        })
+        await client.rpush(f"hac:metering:{organization_id}:events", event_payload)
+        return int(new_total)
+
+    async def get_metered_usage_redis(self, organization_id: str, resource: str) -> int:
+        """Returns the current pending Redis usage count for a tenant and resource."""
+        from services.common.redis_service import get_redis_client
+        client = await get_redis_client()
+        val = await client.get(f"hac:metering:{organization_id}:{resource}")
+        return int(val) if val else 0
+
+    async def sync_redis_usage_to_postgres(self, db: Optional[AsyncSession] = None) -> int:
+        """Syncs all pending Redis-metered tenant usage events to PostgreSQL UsageEvent records."""
+        from services.common.redis_service import get_redis_client
+        import json
+        client = await get_redis_client()
+        tenants = await client.smembers("hac:metering:active_tenants")
+        if not tenants:
+            return 0
+
+        session = db or self.db_session
+        is_local = False
+        if not session:
+            session = AsyncSessionLocal()
+            is_local = True
+
+        total_synced = 0
+        try:
+            for t in tenants:
+                tenant_id = t if isinstance(t, str) else t.decode()
+                events_key = f"hac:metering:{tenant_id}:events"
+                while True:
+                    raw_event = await client.lpop(events_key)
+                    if not raw_event:
+                        break
+                    evt = json.loads(raw_event)
+                    usage_rec = UsageEvent(
+                        id=evt["id"],
+                        organization_id=evt["organization_id"],
+                        property_id=evt.get("property_id"),
+                        agent_id=evt.get("agent_id"),
+                        event_type=evt.get("event_type"),
+                        quantity=evt.get("quantity", 1),
+                        unit=evt.get("unit", "tokens"),
+                        created_at=datetime.fromisoformat(evt["created_at"]) if isinstance(evt.get("created_at"), str) else datetime.now(timezone.utc)
+                    )
+                    session.add(usage_rec)
+                    total_synced += 1
+
+                for res in ["tokens", "voice_minutes", "whatsapp_messages", "agent_turn", "llm_tokens", "messages"]:
+                    await client.delete(f"hac:metering:{tenant_id}:{res}")
+                await client.srem("hac:metering:active_tenants", tenant_id)
+
+            await session.commit()
+            return total_synced
+        except Exception as e:
+            await session.rollback()
+            raise e
+        finally:
+            if is_local:
+                await session.close()
 
     async def update_subscription_plan_async(
         self,

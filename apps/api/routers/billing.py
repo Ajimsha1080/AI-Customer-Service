@@ -295,3 +295,28 @@ async def get_dunning_status(
         "portal_recovery_url": "/app/billing"
     }
 
+class CheckQuotaRequest(BaseModel):
+    organization_id: str
+    resource: str
+
+@router.post("/api/v1/billing/check-quota")
+async def check_quota_endpoint(
+    req: CheckQuotaRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    org_id = verify_tenant_access(current_user, req.organization_id)
+    allowed, reason, details = await metering_service.check_billing_quota(org_id, resource=req.resource, db=db)
+    if not allowed:
+        raise HTTPException(status_code=status.HTTP_402_PAYMENT_REQUIRED, detail=f"Billing quota exceeded: {reason}")
+    return {"allowed": True, "details": details}
+
+@router.post("/api/v1/billing/sync-usage")
+async def sync_billing_usage(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    synced = await metering_service.sync_redis_usage_to_postgres(db=db)
+    return {"status": "synced", "events_synced": synced}
+
+
