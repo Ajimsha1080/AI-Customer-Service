@@ -32,6 +32,12 @@ class Settings(BaseSettings):
     DATABASE_READ_REPLICA_URL: Optional[str] = None
     PGVECTOR_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/hospitality_agent_cloud"
     REDIS_URL: str = "redis://127.0.0.1:6379/0"
+    REDIS_PASSWORD: Optional[str] = None
+    REDIS_SENTINEL_HOSTS: Optional[str] = None
+    REDIS_SENTINEL_MASTER: str = "mymaster"
+    REDIS_CLUSTER_MODE: bool = False
+    REDIS_TLS: bool = False
+    REDIS_MAX_CONNECTIONS: int = 50
 
     DB_POOL_SIZE: int = 20
     DB_MAX_OVERFLOW: int = 10
