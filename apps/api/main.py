@@ -100,46 +100,9 @@ app.add_middleware(
 
 setup_opentelemetry(app)
 
-# --- ERROR HANDLERS ---
-@app.exception_handler(HTTPException)
-@app.exception_handler(StarletteHTTPException)
-async def custom_http_exception_handler(request: Request, exc: Exception):
-    status_code = getattr(exc, "status_code", 400)
-    detail = getattr(exc, "detail", str(exc))
-    request_id = getattr(request.state, "request_id", f"req_{uuid.uuid4().hex[:12]}")
-    resp_headers = {"X-Request-ID": request_id}
-    exc_headers = getattr(exc, "headers", None)
-    if exc_headers and isinstance(exc_headers, dict):
-        resp_headers.update(exc_headers)
-    return JSONResponse(
-        status_code=status_code,
-        headers=resp_headers,
-        content={
-            "detail": str(detail),
-            "error": {
-                "code": "HTTP_ERROR",
-                "status_code": status_code,
-                "message": str(detail),
-                "request_id": request_id
-            }
-        }
-    )
-
-@app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
-    request_id = getattr(request.state, "request_id", f"req_{uuid.uuid4().hex[:12]}")
-    return JSONResponse(
-        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        headers={"X-Request-ID": request_id},
-        content={
-            "error": {
-                "code": "INTERNAL_SERVER_ERROR",
-                "status_code": 500,
-                "message": "An unexpected system error occurred. Our operations team has been notified.",
-                "request_id": request_id
-            }
-        }
-    )
+# --- UNIFIED ERROR ENVELOPE HANDLERS ---
+from apps.api.middleware.error_handler import register_error_handlers
+register_error_handlers(app)
 
 from apps.api.routers import (
     health, auth, agents, voice, billing, integrations, platform, conversations,
