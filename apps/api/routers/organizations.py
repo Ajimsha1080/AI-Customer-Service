@@ -135,6 +135,13 @@ async def create_invitation(
             detail="Only organization Admins or Owners may invite new members."
         )
 
+    # H16: Enforce email verification before creating invitations
+    if not current_user.email_verified:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="EMAIL_NOT_VERIFIED: You must verify your email address before inviting new members."
+        )
+
     # C3: Explicit allowlist and hierarchy checks for invitations
     target_role_str = req.role.upper().strip()
     if target_role_str not in ALLOWED_TENANT_ASSIGNABLE_ROLES:

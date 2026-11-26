@@ -22,7 +22,8 @@ from apps.api.auth import (
     decode_refresh_token_async, revoke_refresh_token,
     get_current_user, generate_oauth_state, verify_oauth_state,
     check_login_lockout, record_failed_login, reset_login_failures,
-    create_user_session, ROLE_HIERARCHY, extract_client_ip
+    create_user_session, ROLE_HIERARCHY, extract_client_ip,
+    create_special_token
 )
 from services.security.limiter import limiter
 from services.security.password_policy import validate_password_policy
@@ -329,6 +330,17 @@ async def login(request: Request, req: LoginRequest, response: Response, db: Asy
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="ORGANIZATION_SUSPENDED: Your organization account has been suspended or deactivated. Contact support."
+            )
+
+    # H16: Enforce email verification before login (or within a grace window)
+    if not user.email_verified and user.role != UserRole.SUPER_ADMIN:
+        now = datetime.now(timezone.utc)
+        created_at = user.created_at.replace(tzinfo=timezone.utc) if (user.created_at and user.created_at.tzinfo is None) else (user.created_at or now)
+        grace_window = timedelta(hours=settings.EMAIL_VERIFICATION_GRACE_HOURS)
+        if (now - created_at) > grace_window:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="EMAIL_NOT_VERIFIED: Please verify your email address to log in. The initial grace period has expired."
             )
 
     # Check Organization-Enforced SSO Policy
@@ -725,9 +737,14 @@ async def verify_email(req: VerifyEmailRequest, db: AsyncSession = Depends(get_d
     """Verifies user email token with single-use invalidation."""
     from jose import jwt, JWTError
     try:
-        payload = jwt.decode(req.token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
-        if payload.get("scope") != "email_verification":
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid token scope")
+        payload = jwt.decode(
+            req.token,
+            settings.JWT_SECRET_KEY,
+            algorithms=[settings.JWT_ALGORITHM],
+            options={"verify_aud": False}
+        )
+        if payload.get("token_type") != "email_verify" or payload.get("aud") != "email_verify" or payload.get("scope") != "email_verification":
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid token scope, type, or audience")
         user_id = payload.get("sub")
     except JWTError:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired verification token")
@@ -749,3 +766,27 @@ async def verify_email(req: VerifyEmailRequest, db: AsyncSession = Depends(get_d
     db.add(RevokedToken(token=token_hash))
     await db.flush()
     return {"message": "Email address verified successfully. You may now log in."}
+
+class ResendVerificationRequest(BaseModel):
+    email: str
+
+@router.post("/resend-verification")
+async def resend_email_verification(req: ResendVerificationRequest, db: AsyncSession = Depends(get_db)):
+    """Generates and sends a new isolated email verification token."""
+    clean_email = req.email.strip().lower()
+    stmt = select(User).where(User.email == clean_email)
+    res = await db.execute(stmt)
+    user = res.scalar_one_or_none()
+    if user and not user.email_verified:
+        verify_token = create_special_token(
+            token_type="email_verify",
+            aud="email_verify",
+            data={"sub": user.id, "email": user.email, "scope": "email_verification"},
+            expires_delta=timedelta(hours=24)
+        )
+        await email_service.send_transactional_email(
+            to_email=user.email,
+            subject="Verify your email address",
+            html_content=f"<p>Verify your email using token: {verify_token}</p>"
+        )
+    return {"message": "If an unverified account exists for this email, a verification link has been sent."}

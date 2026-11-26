@@ -189,6 +189,24 @@ class EmailDeliveryService:
         text_content = self._render_template_file(txt_file, ctx)
         return text_content, html_content
 
+    async def send_transactional_email(
+        self,
+        to_email: str,
+        subject: str,
+        html_content: str,
+        text_content: Optional[str] = None,
+        sender: Optional[str] = None
+    ) -> bool:
+        clean_email = to_email.lower().strip()
+        if self.is_suppressed(clean_email):
+            logger.warning(f"[EmailDelivery] Delivery skipped: {clean_email} is on suppression list.")
+            return False
+        from apps.api.config import settings
+        from_email = sender or getattr(settings, "DEFAULT_FROM_EMAIL", "noreply@concierge-ai.com")
+        provider = self._get_provider()
+        txt = text_content or html_content
+        return await provider.send(to_email=clean_email, subject=subject, text_content=txt, html_content=html_content, sender=from_email)
+
     async def send_email(
         self,
         to_email: str,

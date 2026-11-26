@@ -47,6 +47,11 @@ async def upgrade_subscription_plan(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
+    if not current_user.email_verified:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="EMAIL_NOT_VERIFIED: You must verify your email address before making billing changes."
+        )
     if current_user.role != UserRole.SUPER_ADMIN:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -66,6 +71,11 @@ async def create_customer_portal(
     db: AsyncSession = Depends(get_db)
 ):
     """Generates a Stripe Customer Portal link for managing subscription and payment methods."""
+    if not current_user.email_verified:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="EMAIL_NOT_VERIFIED: You must verify your email address before making billing changes."
+        )
     org_id = verify_tenant_access(current_user, organization_id)
     server_return_url = f"{settings.FRONTEND_BASE_URL.rstrip('/')}/app/billing"
     if req.return_url and req.return_url.rstrip('/') != server_return_url.rstrip('/'):
@@ -87,6 +97,11 @@ async def create_stripe_checkout_session(
     db: AsyncSession = Depends(get_db)
 ):
     """Creates a Stripe Checkout Session for subscription upgrade with server-derived redirect targets."""
+    if not current_user.email_verified:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="EMAIL_NOT_VERIFIED: You must verify your email address before making billing changes."
+        )
     org_id = verify_tenant_access(current_user, organization_id)
     server_success_url = f"{settings.FRONTEND_BASE_URL.rstrip('/')}/app/billing?session=success"
     server_cancel_url = f"{settings.FRONTEND_BASE_URL.rstrip('/')}/app/billing?session=cancel"

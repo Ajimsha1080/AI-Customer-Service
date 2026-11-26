@@ -86,6 +86,7 @@ class Settings(BaseSettings):
     EMAIL_WEBHOOK_SECRET: Optional[str] = None
     SENDGRID_WEBHOOK_VERIFICATION_KEY: Optional[str] = None
     AWS_SNS_TOPIC_ARN: Optional[str] = None
+    EMAIL_VERIFICATION_GRACE_HOURS: int = 24
 
     LLM_TIMEOUT_SECONDS: float = 15.0
     DEFAULT_LLM_MODEL: str = "gpt-4o-mini"
